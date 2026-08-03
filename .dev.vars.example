@@ -1,0 +1,10 @@
+# 复制为 .dev.vars 并填入真实值（.dev.vars 已被 gitignore，不会提交）
+
+# we-learning-suite-api 的地址（本地联调时 wrangler dev 默认端口 8787）
+API_BASE_URL=http://127.0.0.1:8787
+
+# 提供商链（JSON 数组，按 priority 升序故障切换；ocrModel 可选，只有图片需要）
+AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://your-provider.example.com/v1","generateModel":"Qwen3-235B-A22B","ocrModel":"PaddleOCR-VL-1.5"}]
+
+# 每家提供商一个 key：AI_PROVIDER_KEY_<NAME 大写，非字母数字转下划线>
+AI_PROVIDER_KEY_MAIN=sk-your-key-here

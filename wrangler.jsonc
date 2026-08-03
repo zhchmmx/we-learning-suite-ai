@@ -1,4 +1,10 @@
 /**
+ * we-learning-suite-ai —— 出题 AI Worker
+ *
+ * 职责：接收 we-learning-suite-api 的服务端触发（ticket + 文档下载链接），
+ * 异步完成「下载文档 → 格式分诊 → OCR（仅图片）→ 多提供商故障切换生成题目 → 校验 → 回写题库」。
+ * 客户端全程不知道本 Worker 的存在。
+ *
  * For more details on how to configure Wrangler, refer to:
  * https://developers.cloudflare.com/workers/wrangler/configuration/
  */
@@ -13,33 +19,42 @@
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"
-	]
+	],
 	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
+	 * 非敏感环境变量（敏感信息用 wrangler secret put 设置）
 	 */
-	// "placement": {  "mode": "smart" }
+	"vars": {
+		// we-learning-suite-api 的地址（验票 / 状态回写 / 题目入库都回调它）
+		// TODO: 部署后替换为实际地址
+		"API_BASE_URL": "https://we-learning-suite-api.example.workers.dev",
+		// 模型提供商列表（OpenAI 兼容端点），JSON 数组，数量不限，按 priority 升序尝试故障切换。
+		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
+		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
+		// TODO: 替换为你的提供商信息
+		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"https://your-provider.example.com/v1\",\"generateModel\":\"Qwen3-235B-A22B\",\"ocrModel\":\"PaddleOCR-VL-1.5\"}]"
+	},
 	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
+	 * 以下变量通过 `npx wrangler secret put <NAME>` 设置，不写在配置文件里：
+	 * AI_PROVIDER_KEY_<NAME> - 每个提供商一个令牌，<NAME> 为提供商 name 的大写形式
+	 *                          （如 name=main 对应 AI_PROVIDER_KEY_MAIN；
+	 *                            name=deepseek 对应 AI_PROVIDER_KEY_DEEPSEEK）
 	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+	"queues": {
+		// 受理端点把任务写入队列
+		"producers": [
+			{
+				"queue": "quiz-generation",
+				"binding": "QUIZ_QUEUE"
+			}
+		],
+		// 本 Worker 自己消费：一次处理一条（出题是长任务），失败最多重试 2 次
+		"consumers": [
+			{
+				"queue": "quiz-generation",
+				"max_batch_size": 1,
+				"max_batch_timeout": 5,
+				"max_retries": 2
+			}
+		]
+	}
 }
