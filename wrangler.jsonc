@@ -4,7 +4,7 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "weapps-learning-suite-ai",
+	"name": "we-learning-suite-ai",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-08-03",
 	"observability": {
