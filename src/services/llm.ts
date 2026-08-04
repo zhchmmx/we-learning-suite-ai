@@ -19,6 +19,7 @@ interface ChatCompletionResponse {
  *
  * @param jsonOutput 请求 JSON 输出模式。若提供商不认识 response_format 参数
  *                   （返回 400），自动去掉该参数重试一次再判断失败。
+ * @param allowEmpty 允许空输出（OCR 场景：图片里没有文字时模型正常返回空内容，不算失败）
  */
 export async function chatCompletion(opts: {
 	baseUrl: string;
@@ -26,9 +27,10 @@ export async function chatCompletion(opts: {
 	model: string;
 	messages: ChatMessage[];
 	jsonOutput?: boolean;
+	allowEmpty?: boolean;
 	timeoutMs?: number;
 }): Promise<string> {
-	const { baseUrl, apiKey, model, messages, jsonOutput, timeoutMs } = opts;
+	const { baseUrl, apiKey, model, messages, jsonOutput, allowEmpty, timeoutMs } = opts;
 	const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
 
 	const attempt = async (withResponseFormat: boolean): Promise<string> => {
@@ -59,7 +61,7 @@ export async function chatCompletion(opts: {
 
 			const data = (await res.json()) as ChatCompletionResponse;
 			const content = data.choices?.[0]?.message?.content;
-			if (typeof content !== 'string' || !content.trim()) {
+			if (typeof content !== 'string' || (!allowEmpty && !content.trim())) {
 				throw new Error(`chat/completions returned empty content (model=${model})`);
 			}
 			return content;

@@ -22,6 +22,8 @@ export type AppEnv = {
 		API_BASE_URL: string;
 		AI_PROVIDERS: string;
 		QUIZ_QUEUE: Queue;
+		/** 内部共享密钥（wrangler secret put AI_INTERNAL_TOKEN）：we-learning-suite-api 调用 /api/ocr 时携带 */
+		AI_INTERNAL_TOKEN: string;
 	};
 	Variables: Record<string, never>;
 };

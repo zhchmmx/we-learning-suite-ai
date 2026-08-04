@@ -153,6 +153,118 @@ describe("POST /api/quiz/generate", () => {
 	});
 });
 
+// ===== OCR 端点 =====
+
+describe("POST /api/ocr", () => {
+	const OCR_PROVIDERS = JSON.stringify([
+		{
+			name: "main",
+			priority: 1,
+			baseUrl: "https://provider.test/v1",
+			generateModel: "gen-m",
+			ocrModel: "ocr-m",
+		},
+	]);
+
+	// 一张 1x1 的假 PNG（base64）
+	const FAKE_IMAGE = { data: "aGVsbG8=", mimeType: "image/png" };
+
+	async function postOcr(body: unknown, customEnv: Env, token?: string) {
+		const headers: Record<string, string> = { "Content-Type": "application/json" };
+		if (token !== undefined) headers["X-Internal-Token"] = token;
+		const request = new IncomingRequest("http://example.com/api/ocr", {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+		});
+		const ctx = createExecutionContext();
+		return worker.fetch(request, customEnv, ctx);
+	}
+
+	it("rejects missing internal token with 401", async () => {
+		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects wrong internal token with 401", async () => {
+		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "wrong");
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects when token secret is not configured (fail closed)", async () => {
+		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "anything");
+		expect(response.status).toBe(401);
+	});
+
+	it("rejects empty images array with 400", async () => {
+		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [] }, customEnv, "secret");
+		expect(response.status).toBe(400);
+	});
+
+	it("rejects unsupported mime type with 400", async () => {
+		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr(
+			{ images: [{ data: "aGVsbG8=", mimeType: "image/gif" }] },
+			customEnv,
+			"secret",
+		);
+		expect(response.status).toBe(400);
+	});
+
+	it("returns 502 when no provider has ocrModel", async () => {
+		const noOcr = JSON.stringify([
+			{ name: "main", priority: 1, baseUrl: "https://provider.test/v1", generateModel: "gen-m" },
+		]);
+		const customEnv = makeEnv({
+			AI_INTERNAL_TOKEN: "secret",
+			AI_PROVIDERS: noOcr,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		expect(response.status).toBe(502);
+	});
+
+	it("happy path: calls OCR model and returns text", async () => {
+		stubFetch((url) => {
+			if (url.includes("/chat/completions")) {
+				return jsonResponse({ choices: [{ message: { content: "转录出来的文字" } }] });
+			}
+			return new Response(`unexpected: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			AI_INTERNAL_TOKEN: "secret",
+			AI_PROVIDERS: OCR_PROVIDERS,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { data: { text: string } };
+		expect(body.data.text).toBe("转录出来的文字");
+	});
+
+	it("returns 422 when OCR result is empty", async () => {
+		stubFetch((url) => {
+			if (url.includes("/chat/completions")) {
+				return jsonResponse({ choices: [{ message: { content: "   " } }] });
+			}
+			return new Response(`unexpected: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			AI_INTERNAL_TOKEN: "secret",
+			AI_PROVIDERS: OCR_PROVIDERS,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		expect(response.status).toBe(422);
+	});
+});
+
 // ===== 队列消费者：文本通道完整管线 =====
 
 describe("queue consumer", () => {

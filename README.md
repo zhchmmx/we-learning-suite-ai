@@ -62,6 +62,28 @@ Content-Type: application/json
 
 **错误：** 400 参数错误 / 401 ticket 无效或过期 / 503 API 项目暂不可达。
 
+### 图片转文字（OCR）
+
+```
+POST /api/ocr
+X-Internal-Token: <AI_INTERNAL_TOKEN>
+Content-Type: application/json
+```
+
+**仅接受 we-learning-suite-api 的代理调用**（客户端上传前的转码经 API 项目中转，依然接触不到本 Worker）。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| images | array | 是 | 1~15 项，每项 `{ data: base64, mimeType: image/jpeg\|image/png\|image/webp }`，单张 ≤4MB |
+
+**响应 (200)：**
+
+```json
+{ "data": { "text": "转录出来的文字" } }
+```
+
+**错误：** 401 令牌错误 / 400 参数错误 / 422 图片中无可识别文字 / 502 所有提供商都不可用。
+
 ## 题目输出格式
 
 与 we-learning-suite-api 的 `/api/quiz/questions/batch` 契约严格一致（三种题型，入库前逐题校验，不合格丢弃）：
@@ -126,6 +148,9 @@ Content-Type: application/json
 ```bash
 npx wrangler secret put AI_PROVIDER_KEY_MAIN
 # 每多一家提供商就多一个：AI_PROVIDER_KEY_<NAME>
+
+# 内部共享密钥：与 we-learning-suite-api 的 AI_INTERNAL_TOKEN 保持同值
+npx wrangler secret put AI_INTERNAL_TOKEN
 ```
 
 ### 3. 本地开发
@@ -136,6 +161,7 @@ npx wrangler secret put AI_PROVIDER_KEY_MAIN
 API_BASE_URL=http://127.0.0.1:8787
 AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://你的提供商/v1","generateModel":"Qwen3-235B-A22B","ocrModel":"PaddleOCR-VL-1.5"}]
 AI_PROVIDER_KEY_MAIN=sk-xxxx
+AI_INTERNAL_TOKEN=两边同值即可
 ```
 
 本地联调时两个 Worker 同时跑：API 项目在 8787，本项目 `npx wrangler dev --port 8788`，并把 API 项目的 `AI_WORKER_URL` 指向 `http://127.0.0.1:8788`。
@@ -149,21 +175,23 @@ npx wrangler deploy
 ## 当前边界（v1）
 
 - 支持格式：TXT、Markdown、JPEG/PNG/WebP 图片（单张 ≤4MB，≤15 张）
-- PDF / Office 会被拒绝——等 we-learning-suite-api 的"上传格式统一 + 客户端转换"任务落地后，PDF 会以文本或页面图形式进入本 Worker
+- PDF / Office 在出题管线里依然会被拒绝——转码发生在客户端上传前：带文字层的 PDF 抽成文本、扫描件渲染成图片走 `/api/ocr`，服务器只存文本（we-learning-suite-api 上传白名单强制）。所以本 Worker 出题时收到的只会是文本
+- `/api/ocr` 同样服务于客户端上传前的图片/扫描件转码（经 API 项目代理）
 - 不做：CORS（无浏览器调用方）、用量日志、限流、长文档自动分段、流式输出
 
 ## 项目结构
 
 ```
 src/
-  index.ts               # Hono 入口（/health、/api/quiz/generate）+ queue 消费者导出
+  index.ts               # Hono 入口（/health、/api/quiz/generate、/api/ocr）+ queue 消费者导出
+  env-secrets.d.ts       # wrangler secret 的类型补充（不参与 cf-typegen）
   types.ts               # 类型定义
   config.ts              # 限制常量 + AI_PROVIDERS 解析
   pipeline.ts            # 队列消费主流程 + 错误分类（重试 vs 终结）
   services/
     api-client.ts        # 回调 we-learning-suite-api（PATCH 状态 / questions/batch）
     providers.ts         # 提供商链式路由（故障切换）
-    llm.ts               # chat completions 调用（response_format 兼容回退）
+    llm.ts               # chat completions 调用（response_format 兼容回退；OCR 允许空输出）
     ocr.ts               # 图片 OCR
     extract.ts           # 下载 + 格式分诊
     generate.ts          # 提示词 + JSON 解析 + 逐题校验

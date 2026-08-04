@@ -42,6 +42,8 @@ export async function ocrImages(opts: {
 			apiKey,
 			model,
 			messages: [{ role: 'user', content }],
+			// 图片里没有文字时模型返回空内容是正常结果，不触发提供商切换
+			allowEmpty: true,
 		});
 
 		if (text.trim()) parts.push(text.trim());

@@ -8,3 +8,6 @@ AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://your-provider.examp
 
 # 每家提供商一个 key：AI_PROVIDER_KEY_<NAME 大写，非字母数字转下划线>
 AI_PROVIDER_KEY_MAIN=sk-your-key-here
+
+# 内部共享密钥：与 we-learning-suite-api 的 AI_INTERNAL_TOKEN secret 保持同值
+AI_INTERNAL_TOKEN=dev-internal-token
