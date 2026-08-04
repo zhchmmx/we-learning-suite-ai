@@ -1,6 +1,6 @@
 # we-learning-suite-ai
 
-基于 Cloudflare Workers 的出题 AI Worker。接收 `we-learning-suite-api` 的服务端触发，异步完成「下载文档 → 格式分诊 → OCR（仅图片）→ 多提供商故障切换生成题目 → 逐题校验 → 回写题库」。
+基于 Cloudflare Workers 的出题 AI Worker。接收 `we-learning-suite-api` 的服务端触发，异步完成「读取 R2 材料 → 格式分诊 → OCR（仅图片）→ 多提供商故障切换生成题目 → 逐题校验 → 回写题库」。
 
 **本 Worker 没有公网入口**（`workers_dev: false`）——只能由 we-learning-suite-api 通过 Service Binding 内部调用，客户端（以及任何外部请求）物理上无法到达；模型提供商地址、令牌、提示词全部封在服务端。
 
@@ -15,18 +15,18 @@
 
 ```
 we-learning-suite-api ──Service Binding 内部直连──→ 本 Worker
-  POST /api/quiz/generate { ticket, downloadUrls }
+  POST /api/quiz/generate { ticket, materials: [{ r2Key, mimeType }] }
   本 Worker：PATCH sessions/:ticket/status = processing（经 Service Binding 回调 API 项目验票，假票当场被拒）
             → 消息入队 → 立刻返回 202
   Queue 消费者：
     1. 复查 ticket 状态（经 Service Binding 回调）
-    2. GET downloadUrls 下载文件（预签名 URL，不带任何认证头）
+    2. 从 R2 直读材料文件（r2Key，不走公网预签名 URL）
     3. 格式分诊：txt/md → 文本通道；jpg/png/webp → 图片通道；其他（含 PDF）→ 失败
     4. 图片 → OCR 模型转文字（每 5 张一批）；与文本合并为语料
     5. 语料超限（>60000 字符 / >15 张图）→ 失败
     6. 组提示词 → 按提供商优先级调 chat/completions（故障自动切换）
     7. 解析 JSON → 逐题校验 → 不合格丢弃 → 一道不剩则失败
-    8. POST /api/quiz/questions/batch 入库（经 Service Binding 回调，API 项目自动置 session completed）
+    8. POST /api/quiz/questions/batch 入库（经 Service Binding 回调，API 项目自动置 quiz 和 session 为 completed）
     任何业务失败 → PATCH status=failed（经 Service Binding）；API 项目 5xx/网络错 → 交给队列重试（最多 2 次）
 ```
 
@@ -52,7 +52,7 @@ Content-Type: application/json
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | ticket | string | 是 | quiz session 的 ticket |
-| downloadUrls | string[] | 是 | 文档预签名下载 URL（1~50 条） |
+| materials | array | 是 | 材料列表（1~50 项），每项 `{ r2Key: string, mimeType: string }` |
 | options.count | number | 否 | 出题数量（1~50，默认 5） |
 
 **响应 (202)：**
