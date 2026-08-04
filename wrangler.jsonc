@@ -31,7 +31,7 @@
 		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
 		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
 		// TODO: 替换为你的提供商信息
-		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"https://your-provider.example.com/v1\",\"generateModel\":\"Qwen3-235B-A22B\",\"ocrModel\":\"PaddleOCR-VL-1.5\"}]"
+		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"http://aigw.dlut.edu.cn/v1\",\"generateModel\":\"Qwen3-235B-A22B\",\"ocrModel\":\"PaddleOCR-VL-1.5\"}]"
 	},
 	/**
 	 * 以下变量通过 `npx wrangler secret put <NAME>` 设置，不写在配置文件里：
