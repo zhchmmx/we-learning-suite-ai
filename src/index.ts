@@ -84,7 +84,7 @@ app.post('/api/quiz/generate', async (c) => {
 			console.error('[401-debug] Ticket callback failed:', { status: err.status, message: err.message, apiBaseUrl: c.env.API_BASE_URL, ticket });
 			return c.json({ error: 'Invalid or expired ticket' }, 401);
 		}
-		console.error('Ticket verification error:', err);
+		console.error('[503-debug] Ticket verification error:', err instanceof Error ? { name: err.name, message: err.message, cause: err.cause, stack: err.stack } : String(err));
 		return c.json({ error: 'Service temporarily unavailable' }, 503);
 	}
 

@@ -18,6 +18,7 @@ export class ApiClientError extends Error {
 
 async function callApi(baseUrl: string, path: string, ticket: string, method: string, body?: unknown): Promise<unknown> {
 	const fullUrl = `${baseUrl.replace(/\/$/, '')}${path}`;
+	console.log('[debug] callApi fetching:', { url: fullUrl, method, hasTicket: !!ticket });
 	const res = await fetch(fullUrl, {
 		method,
 		headers: {
