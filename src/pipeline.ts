@@ -1,6 +1,6 @@
 import { MAX_TEXT_CHARS } from './config';
 import { ApiClientError, patchSessionStatus, uploadQuestions } from './services/api-client';
-import { downloadAndExtract, TaskError } from './services/extract';
+import { readFromR2, TaskError } from './services/extract';
 import { buildUserPrompt, GENERATE_SYSTEM_PROMPT, parseModelJson, validateQuestions } from './services/generate';
 import { chatCompletion } from './services/llm';
 import { ocrImages } from './services/ocr';
@@ -15,15 +15,15 @@ type Bindings = AppEnv['Bindings'];
  * 验票 → 下载分诊 → OCR（仅图片）→ 组语料 → 多提供商生成 → 校验 → 入库
  */
 export async function processGenerateMessage(message: GenerateMessage, env: Bindings): Promise<void> {
-	const { ticket, downloadUrls } = message;
+	const { ticket, materials } = message;
 	const count = message.options?.count ?? 5;
 
 	// 1. 验票 + 状态确认（受理端点已 PATCH 过 processing，这里是消费开始前的复查，
 	//    防止 ticket 在排队期间过期或 session 已被其他路径终结）
 	await patchSessionStatus(env.API_WORKER, ticket, 'processing');
 
-	// 2. 下载 + 格式分诊
-	const material = await downloadAndExtract(downloadUrls);
+	// 2. 从 R2 直读材料 + 格式分诊（不走公网预签名 URL）
+	const material = await readFromR2(env.R2_BUCKET, materials);
 
 	// 3. 图片走 OCR 转文字（生成永远只吃文本）
 	let corpus = material.texts.join('\n\n');

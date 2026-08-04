@@ -17,11 +17,10 @@ export const OCR_IMAGES_PER_CALL = 5;
 
 /** 模型调用超时（出题是长任务，给足时间） */
 export const MODEL_TIMEOUT_MS = 120_000;
-export const DOWNLOAD_TIMEOUT_MS = 60_000;
 export const API_CALLBACK_TIMEOUT_MS = 15_000;
 
-/** 受理端点校验 body 时 downloadUrls 的上限条数 */
-export const MAX_DOWNLOAD_URLS = 50;
+/** 受理端点校验 body 时材料的数量上限 */
+export const MAX_MATERIALS = 50;
 
 /** 支持的 MIME 类型 → 通道 */
 export const TEXT_MIME_TYPES = new Set(['text/plain', 'text/markdown', 'text/x-markdown']);

@@ -38,6 +38,14 @@
 	 *                          （如 name=main 对应 AI_PROVIDER_KEY_MAIN；
 	 *                            name=deepseek 对应 AI_PROVIDER_KEY_DEEPSEEK）
 	 */
+	// R2 对象存储绑定 —— 直接读取 API Worker 上传的文件（不走公网预签名 URL）
+	"r2_buckets": [
+		{
+			"binding": "R2_BUCKET",
+			"bucket_name": "we-learning-suite"
+		}
+	],
+
 	// Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库）
 	"services": [
 		{

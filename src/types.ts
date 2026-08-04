@@ -16,11 +16,21 @@ export interface ProviderConfig {
 	ocrModel?: string;
 }
 
+/** 单个待处理材料（一个 R2 对象） */
+export interface MaterialItem {
+	/** R2 对象 key */
+	r2Key: string;
+	/** MIME 类型，如 "text/plain" / "image/png" */
+	mimeType: string;
+}
+
 /** Hono 环境类型 */
 export type AppEnv = {
 	Bindings: {
 		/** Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库） */
 		API_WORKER: Fetcher;
+		/** R2 对象存储绑定（与 we-learning-suite-api 共享同一个 bucket） */
+		R2_BUCKET: R2Bucket;
 		AI_PROVIDERS: string;
 		QUIZ_QUEUE: Queue;
 	};
@@ -30,7 +40,8 @@ export type AppEnv = {
 /** 队列消息体 */
 export interface GenerateMessage {
 	ticket: string;
-	downloadUrls: string[];
+	/** 待处理材料列表（由 API Worker 直接传 R2 key，不走预签名 URL） */
+	materials: MaterialItem[];
 	options?: {
 		count?: number;
 	};

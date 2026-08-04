@@ -2,9 +2,9 @@ import { Hono } from 'hono';
 import {
 	DEFAULT_QUESTION_COUNT,
 	IMAGE_MIME_TYPES,
-	MAX_DOWNLOAD_URLS,
 	MAX_IMAGE_BYTES,
 	MAX_IMAGES,
+	MAX_MATERIALS,
 	MAX_QUESTION_COUNT,
 	MIN_QUESTION_COUNT,
 	parseProviders,
@@ -13,7 +13,7 @@ import { handleGenerateMessage } from './pipeline';
 import { ApiClientError, patchSessionStatus } from './services/api-client';
 import { ocrImages } from './services/ocr';
 import { walkProviderChain } from './services/providers';
-import type { AppEnv, GenerateMessage } from './types';
+import type { AppEnv, GenerateMessage, MaterialItem } from './types';
 
 /**
  * we-learning-suite-ai —— 出题 AI Worker 入口
@@ -37,7 +37,7 @@ app.get('/health', (c) =>
  * POST /api/quiz/generate
  * 受理出题任务（由 we-learning-suite-api 服务端调用，凭证 = ticket）
  *
- * Body: { ticket, downloadUrls: string[], options?: { count?: number } }
+ * Body: { ticket, materials: Array<{ r2Key: string, mimeType: string }>, options?: { count?: number } }
  * 流程：PATCH status=processing 验票 → 消息入队 → 立刻返回 202
  */
 app.post('/api/quiz/generate', async (c) => {
@@ -53,14 +53,14 @@ app.post('/api/quiz/generate', async (c) => {
 		return c.json({ error: '"ticket" is required' }, 400);
 	}
 
-	const downloadUrls = body.downloadUrls;
+	const materials = body.materials;
 	if (
-		!Array.isArray(downloadUrls) ||
-		downloadUrls.length === 0 ||
-		downloadUrls.length > MAX_DOWNLOAD_URLS ||
-		downloadUrls.some((u) => typeof u !== 'string' || !u.startsWith('http'))
+		!Array.isArray(materials) ||
+		materials.length === 0 ||
+		materials.length > MAX_MATERIALS ||
+		materials.some((m) => !m || typeof m.r2Key !== 'string' || !m.r2Key || typeof m.mimeType !== 'string' || !m.mimeType)
 	) {
-		return c.json({ error: `"downloadUrls" must be an array of 1~${MAX_DOWNLOAD_URLS} HTTP(S) URLs` }, 400);
+		return c.json({ error: `"materials" must be an array of 1~${MAX_MATERIALS} items each with "r2Key" and "mimeType"` }, 400);
 	}
 
 	let count = DEFAULT_QUESTION_COUNT;
@@ -89,7 +89,7 @@ app.post('/api/quiz/generate', async (c) => {
 
 	const message: GenerateMessage = {
 		ticket,
-		downloadUrls: downloadUrls as string[],
+		materials: materials as MaterialItem[],
 		options: { count },
 	};
 	await c.env.QUIZ_QUEUE.send(message);

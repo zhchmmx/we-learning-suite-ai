@@ -9,7 +9,7 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
 // ===== 工具 =====
 
-/** 桩全局 fetch（用于 R2 下载、模型 API 调用等非 Service Binding 的外呼） */
+/** 桩全局 fetch（模型 API 调用等非 Service Binding 的外呼） */
 function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
 	vi.stubGlobal(
 		"fetch",
@@ -101,17 +101,17 @@ describe("POST /api/quiz/generate", () => {
 	it("rejects missing ticket with 400", async () => {
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ downloadUrls: ["https://r2.test/a.txt"] },
+			{ materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
 		expect(send).not.toHaveBeenCalled();
 	});
 
-	it("rejects invalid downloadUrls with 400", async () => {
+	it("rejects invalid materials with 400", async () => {
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", downloadUrls: [] },
+			{ ticket: "t-1", materials: [] },
 			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
@@ -121,7 +121,7 @@ describe("POST /api/quiz/generate", () => {
 	it("rejects out-of-range count with 400", async () => {
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"], options: { count: 999 } },
+			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }], options: { count: 999 } },
 			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
@@ -137,7 +137,7 @@ describe("POST /api/quiz/generate", () => {
 
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"] },
+			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(401);
@@ -154,14 +154,14 @@ describe("POST /api/quiz/generate", () => {
 
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"], options: { count: 8 } },
+			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }], options: { count: 8 } },
 			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(202);
 		expect(send).toHaveBeenCalledTimes(1);
 		expect(send).toHaveBeenCalledWith({
 			ticket: "t-1",
-			downloadUrls: ["https://r2.test/a.txt"],
+			materials: [{ r2Key: "a.txt", mimeType: "text/plain" }],
 			options: { count: 8 },
 		});
 	});
@@ -254,12 +254,17 @@ describe("POST /api/ocr", () => {
 	});
 });
 
-// ===== 队列消费者：文本通道完整管线 =====
+// ===== 队列消费者：R2 直读 → 文本通道完整管线 =====
 
 describe("queue consumer", () => {
-	it("text channel: download -> generate -> validate -> upload", async () => {
+	it("text channel: read from R2 -> generate -> validate -> upload", async () => {
 		const calls: string[] = [];
 		let uploadedBody: { questions?: unknown[] } | null = null;
+
+		// 把测试材料写入 R2 模拟桶
+		await env.R2_BUCKET.put("material.txt", "光合作用是植物利用光能将二氧化碳和水转化为有机物的过程。", {
+			httpMetadata: { contentType: "text/plain" },
+		});
 
 		// Service Binding 回调（验票 / 入库）走 API_WORKER.fetch
 		const apiWorker = makeApiWorker(async (url, init) => {
@@ -275,14 +280,8 @@ describe("queue consumer", () => {
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		// 下载 + 模型调用走全局 fetch
+		// 模型调用走全局 fetch
 		stubFetch(async (url) => {
-			if (url === "https://r2.test/material.txt") {
-				calls.push("download");
-				return new Response("光合作用是植物利用光能将二氧化碳和水转化为有机物的过程。", {
-					headers: { "Content-Type": "text/plain" },
-				});
-			}
 			if (url.includes("/chat/completions")) {
 				calls.push("llm");
 				return jsonResponse({ choices: [{ message: { content: VALID_QUESTIONS_JSON } }] });
@@ -294,19 +293,30 @@ describe("queue consumer", () => {
 		const batch = {
 			messages: [
 				{
-					body: { ticket: "t-1", downloadUrls: ["https://r2.test/material.txt"], options: { count: 5 } },
+					body: { ticket: "t-1", materials: [{ r2Key: "material.txt", mimeType: "text/plain" }], options: { count: 5 } },
 				},
 			],
 		} as unknown as MessageBatch<unknown>;
 
 		await worker.queue(batch, customEnv);
 
-		expect(calls).toEqual(["patch", "download", "llm", "batch"]);
+		expect(calls).toEqual(["patch", "llm", "batch"]);
 		expect(uploadedBody?.questions).toHaveLength(2);
 	});
 
 	it("unsupported format marks session failed without uploading", async () => {
 		const calls: string[] = [];
+
+		// 使用内存 mock R2 bucket，避免 Windows 上 SQLite 文件锁问题
+		const mockR2 = {
+			async get(_key: string) {
+				return {
+					text: async () => "fake-content",
+					arrayBuffer: async () => new ArrayBuffer(0),
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				};
+			},
+		} as unknown as R2Bucket;
 
 		const apiWorker = makeApiWorker(async (url) => {
 			if (url.includes("/sessions/") && url.endsWith("/status")) {
@@ -316,16 +326,9 @@ describe("queue consumer", () => {
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		stubFetch(async (url) => {
-			if (url === "https://r2.test/doc.pdf") {
-				return new Response("fake-pdf", { headers: { "Content-Type": "application/pdf" } });
-			}
-			return new Response(`unexpected fetch: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key", R2_BUCKET: mockR2 });
 		const batch = {
-			messages: [{ body: { ticket: "t-2", downloadUrls: ["https://r2.test/doc.pdf"] } }],
+			messages: [{ body: { ticket: "t-2", materials: [{ r2Key: "doc.pdf", mimeType: "application/pdf" }] } }],
 		} as unknown as MessageBatch<unknown>;
 
 		await worker.queue(batch, customEnv);
