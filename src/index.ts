@@ -99,9 +99,9 @@ app.post('/api/quiz/generate', async (c) => {
 
 /**
  * POST /api/ocr
- * 图片转文字（由 we-learning-suite-api 代理转发，客户端不直接访问本 Worker）
+ * 图片转文字。本 Worker 已关闭公网入口（workers_dev: false），
+ * 只能由 we-learning-suite-api 通过 Service Binding 内部调用，因此无需额外鉴权。
  *
- * 鉴权：请求头 X-Internal-Token 必须与 secret AI_INTERNAL_TOKEN 一致
  * Body: { images: [{ data: base64 字符串, mimeType: "image/jpeg"|"image/png"|"image/webp" }] }
  * 返回：{ data: { text } }
  *
@@ -109,12 +109,6 @@ app.post('/api/quiz/generate', async (c) => {
  * 保证服务端只存文本、出题管线只吃文本。
  */
 app.post('/api/ocr', async (c) => {
-	// 内部令牌校验（secret 未配置时一律拒绝，fail closed）
-	const token = c.req.header('X-Internal-Token');
-	if (!c.env.AI_INTERNAL_TOKEN || token !== c.env.AI_INTERNAL_TOKEN) {
-		return c.json({ error: 'Unauthorized' }, 401);
-	}
-
 	let body: { images?: Array<{ data?: unknown; mimeType?: unknown }> };
 	try {
 		body = await c.req.json();

@@ -2,7 +2,7 @@
 
 基于 Cloudflare Workers 的出题 AI Worker。接收 `we-learning-suite-api` 的服务端触发，异步完成「下载文档 → 格式分诊 → OCR（仅图片）→ 多提供商故障切换生成题目 → 逐题校验 → 回写题库」。
 
-**客户端全程不知道本 Worker 的存在**——触发由 API 项目在服务端发起，凭证是 quiz session 的 ticket；模型提供商地址、令牌、提示词全部封在服务端。
+**本 Worker 没有公网入口**（`workers_dev: false`）——只能由 we-learning-suite-api 通过 Service Binding 内部调用，客户端（以及任何外部请求）物理上无法到达；模型提供商地址、令牌、提示词全部封在服务端。
 
 ## 技术栈
 
@@ -14,7 +14,8 @@
 ## 处理链路
 
 ```
-we-learning-suite-api ──POST /api/quiz/generate { ticket, downloadUrls }──→ 本 Worker
+we-learning-suite-api ──Service Binding 内部直连──→ 本 Worker
+  POST /api/quiz/generate { ticket, downloadUrls }
   本 Worker：PATCH sessions/:ticket/status = processing（借 API 项目验票，假票当场被拒）
             → 消息入队 → 立刻返回 202
   Queue 消费者：
@@ -37,7 +38,7 @@ we-learning-suite-api ──POST /api/quiz/generate { ticket, downloadUrls }─�
 GET /health
 ```
 
-无需鉴权。
+无公网入口，仅本地开发（`wrangler dev`）或 Service Binding 内可达。
 
 ### 受理出题任务
 
@@ -46,7 +47,7 @@ POST /api/quiz/generate
 Content-Type: application/json
 ```
 
-**仅接受 we-learning-suite-api 的服务端调用**，凭证为 ticket（通过回调 API 项目的 PATCH 状态接口完成验证）。
+**仅 we-learning-suite-api 经 Service Binding 调用**，凭证为 ticket（通过回调 API 项目的 PATCH 状态接口完成验证）。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -66,11 +67,10 @@ Content-Type: application/json
 
 ```
 POST /api/ocr
-X-Internal-Token: <AI_INTERNAL_TOKEN>
 Content-Type: application/json
 ```
 
-**仅接受 we-learning-suite-api 的代理调用**（客户端上传前的转码经 API 项目中转，依然接触不到本 Worker）。
+**无公网入口，无需鉴权**：只能由 we-learning-suite-api 经 Service Binding 内部调用（客户端上传前的转码由 API 项目中转）。
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -82,7 +82,7 @@ Content-Type: application/json
 { "data": { "text": "转录出来的文字" } }
 ```
 
-**错误：** 401 令牌错误 / 400 参数错误 / 422 图片中无可识别文字 / 502 所有提供商都不可用。
+**错误：** 400 参数错误 / 422 图片中无可识别文字 / 502 所有提供商都不可用。
 
 ## 题目输出格式
 
@@ -148,9 +148,6 @@ Content-Type: application/json
 ```bash
 npx wrangler secret put AI_PROVIDER_KEY_MAIN
 # 每多一家提供商就多一个：AI_PROVIDER_KEY_<NAME>
-
-# 内部共享密钥：与 we-learning-suite-api 的 AI_INTERNAL_TOKEN 保持同值
-npx wrangler secret put AI_INTERNAL_TOKEN
 ```
 
 ### 3. 本地开发
@@ -161,10 +158,9 @@ npx wrangler secret put AI_INTERNAL_TOKEN
 API_BASE_URL=http://127.0.0.1:8787
 AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://你的提供商/v1","generateModel":"Qwen3-235B-A22B","ocrModel":"PaddleOCR-VL-1.5"}]
 AI_PROVIDER_KEY_MAIN=sk-xxxx
-AI_INTERNAL_TOKEN=两边同值即可
 ```
 
-本地联调时两个 Worker 同时跑：API 项目在 8787，本项目 `npx wrangler dev --port 8788`，并把 API 项目的 `AI_WORKER_URL` 指向 `http://127.0.0.1:8788`。
+本地联调时两个 Worker 同时跑：本项目 `npx wrangler dev --port 8788`，API 项目 `npx wrangler dev`（默认 8787）。API 项目通过 Service Binding 连本 Worker，两边都在本地运行时 wrangler 会自动把绑定指向本地实例。
 
 ## 部署
 
@@ -172,11 +168,13 @@ AI_INTERNAL_TOKEN=两边同值即可
 npx wrangler deploy
 ```
 
+注意：`workers_dev: false`，部署后原有的 `*.workers.dev` 公网地址会失效（这正是目的），只能通过 API 项目的 Service Binding 访问。
+
 ## 当前边界（v1）
 
 - 支持格式：TXT、Markdown、JPEG/PNG/WebP 图片（单张 ≤4MB，≤15 张）
 - PDF / Office 在出题管线里依然会被拒绝——转码发生在客户端上传前：带文字层的 PDF 抽成文本、扫描件渲染成图片走 `/api/ocr`，服务器只存文本（we-learning-suite-api 上传白名单强制）。所以本 Worker 出题时收到的只会是文本
-- `/api/ocr` 同样服务于客户端上传前的图片/扫描件转码（经 API 项目代理）
+- `/api/ocr` 同样服务于客户端上传前的图片/扫描件转码（经 API 项目 Service Binding 中转）
 - 不做：CORS（无浏览器调用方）、用量日志、限流、长文档自动分段、流式输出
 
 ## 项目结构
@@ -184,7 +182,6 @@ npx wrangler deploy
 ```
 src/
   index.ts               # Hono 入口（/health、/api/quiz/generate、/api/ocr）+ queue 消费者导出
-  env-secrets.d.ts       # wrangler secret 的类型补充（不参与 cf-typegen）
   types.ts               # 类型定义
   config.ts              # 限制常量 + AI_PROVIDERS 解析
   pipeline.ts            # 队列消费主流程 + 错误分类（重试 vs 终结）

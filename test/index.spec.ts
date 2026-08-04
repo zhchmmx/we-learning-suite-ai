@@ -169,49 +169,27 @@ describe("POST /api/ocr", () => {
 	// 一张 1x1 的假 PNG（base64）
 	const FAKE_IMAGE = { data: "aGVsbG8=", mimeType: "image/png" };
 
-	async function postOcr(body: unknown, customEnv: Env, token?: string) {
-		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		if (token !== undefined) headers["X-Internal-Token"] = token;
+	// 注：生产环境本端点无公网入口（workers_dev: false，仅 Service Binding 可达），
+	// 测试直接调 worker.fetch 等价于内部调用，无需鉴权用例
+	async function postOcr(body: unknown, customEnv: Env) {
 		const request = new IncomingRequest("http://example.com/api/ocr", {
 			method: "POST",
-			headers,
+			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
 		});
 		const ctx = createExecutionContext();
 		return worker.fetch(request, customEnv, ctx);
 	}
 
-	it("rejects missing internal token with 401", async () => {
-		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
-		expect(response.status).toBe(401);
-	});
-
-	it("rejects wrong internal token with 401", async () => {
-		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "wrong");
-		expect(response.status).toBe(401);
-	});
-
-	it("rejects when token secret is not configured (fail closed)", async () => {
-		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "anything");
-		expect(response.status).toBe(401);
-	});
-
 	it("rejects empty images array with 400", async () => {
-		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
-		const response = await postOcr({ images: [] }, customEnv, "secret");
+		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [] }, customEnv);
 		expect(response.status).toBe(400);
 	});
 
 	it("rejects unsupported mime type with 400", async () => {
-		const customEnv = makeEnv({ AI_INTERNAL_TOKEN: "secret", AI_PROVIDERS: OCR_PROVIDERS });
-		const response = await postOcr(
-			{ images: [{ data: "aGVsbG8=", mimeType: "image/gif" }] },
-			customEnv,
-			"secret",
-		);
+		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [{ data: "aGVsbG8=", mimeType: "image/gif" }] }, customEnv);
 		expect(response.status).toBe(400);
 	});
 
@@ -220,11 +198,10 @@ describe("POST /api/ocr", () => {
 			{ name: "main", priority: 1, baseUrl: "https://provider.test/v1", generateModel: "gen-m" },
 		]);
 		const customEnv = makeEnv({
-			AI_INTERNAL_TOKEN: "secret",
 			AI_PROVIDERS: noOcr,
 			AI_PROVIDER_KEY_MAIN: "test-key",
 		});
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
 		expect(response.status).toBe(502);
 	});
 
@@ -237,11 +214,10 @@ describe("POST /api/ocr", () => {
 		});
 
 		const customEnv = makeEnv({
-			AI_INTERNAL_TOKEN: "secret",
 			AI_PROVIDERS: OCR_PROVIDERS,
 			AI_PROVIDER_KEY_MAIN: "test-key",
 		});
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
 		expect(response.status).toBe(200);
 		const body = (await response.json()) as { data: { text: string } };
 		expect(body.data.text).toBe("转录出来的文字");
@@ -256,11 +232,10 @@ describe("POST /api/ocr", () => {
 		});
 
 		const customEnv = makeEnv({
-			AI_INTERNAL_TOKEN: "secret",
 			AI_PROVIDERS: OCR_PROVIDERS,
 			AI_PROVIDER_KEY_MAIN: "test-key",
 		});
-		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv, "secret");
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
 		expect(response.status).toBe(422);
 	});
 });

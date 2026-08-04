@@ -13,6 +13,9 @@
 	"name": "we-learning-suite-ai",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-08-03",
+	// 关闭公网入口：本 Worker 只能通过 we-learning-suite-api 的 Service Binding 调用，
+	// 任何外部请求（含客户端）物理上无法到达。Queue 消费者不受影响。
+	"workers_dev": false,
 	"observability": {
 		"enabled": true
 	},
@@ -25,12 +28,10 @@
 	 */
 	"vars": {
 		// we-learning-suite-api 的地址（验票 / 状态回写 / 题目入库都回调它）
-		// TODO: 部署后替换为实际地址
-		"API_BASE_URL": "https://we-learning-suite-api.example.workers.dev",
+		"API_BASE_URL": "https://we-learning-suite-api.zhchmmx.workers.dev",
 		// 模型提供商列表（OpenAI 兼容端点），JSON 数组，数量不限，按 priority 升序尝试故障切换。
 		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
 		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
-		// TODO: 替换为你的提供商信息
 		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"http://aigw.dlut.edu.cn/v1\",\"generateModel\":\"Qwen3-235B-A22B\",\"ocrModel\":\"PaddleOCR-VL-1.5\"}]"
 	},
 	/**
