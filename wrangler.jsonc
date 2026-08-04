@@ -27,8 +27,6 @@
 	 * 非敏感环境变量（敏感信息用 wrangler secret put 设置）
 	 */
 	"vars": {
-		// we-learning-suite-api 的地址（验票 / 状态回写 / 题目入库都回调它）
-		"API_BASE_URL": "https://we-learning-suite-api.zhchmmx.workers.dev",
 		// 模型提供商列表（OpenAI 兼容端点），JSON 数组，数量不限，按 priority 升序尝试故障切换。
 		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
 		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
@@ -40,6 +38,13 @@
 	 *                          （如 name=main 对应 AI_PROVIDER_KEY_MAIN；
 	 *                            name=deepseek 对应 AI_PROVIDER_KEY_DEEPSEEK）
 	 */
+	// Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库）
+	"services": [
+		{
+			"binding": "API_WORKER",
+			"service": "we-learning-suite-api"
+		}
+	],
 	"queues": {
 		// 受理端点把任务写入队列
 		"producers": [

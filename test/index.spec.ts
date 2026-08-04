@@ -9,6 +9,7 @@ const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
 // ===== 工具 =====
 
+/** 桩全局 fetch（用于 R2 下载、模型 API 调用等非 Service Binding 的外呼） */
 function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
 	vi.stubGlobal(
 		"fetch",
@@ -19,6 +20,16 @@ function stubFetch(handler: (url: string, init?: RequestInit) => Response | Prom
 	);
 }
 
+/** 构造模拟 Service Binding Fetcher（AI→API 回调走此路径，不再经过全局 fetch） */
+function makeApiWorker(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): Fetcher {
+	return {
+		fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			return handler(url, init);
+		},
+	} as unknown as Fetcher;
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), {
 		status,
@@ -26,7 +37,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
-/** 构造带自定义绑定的测试 env（替换 API 地址与队列绑定，注入提供商密钥） */
+/** 构造带自定义绑定的测试 env（替换 Service Binding 与队列绑定，注入提供商密钥） */
 function makeEnv(overrides: Record<string, unknown>): Env {
 	return { ...env, ...overrides } as unknown as Env;
 }
@@ -72,7 +83,10 @@ describe("GET /health", () => {
 // ===== 受理端点 =====
 
 describe("POST /api/quiz/generate", () => {
-	const apiUrl = "https://api.test";
+	/** 不做 API 回调的测试用：提供一个拒绝一切调用的 mock Fetcher */
+	const rejectAllApiWorker = makeApiWorker((url) =>
+		new Response(`unexpected API call: ${url}`, { status: 599 }),
+	);
 
 	async function postGenerate(body: unknown, customEnv: Env) {
 		const request = new IncomingRequest("http://example.com/api/quiz/generate", {
@@ -88,7 +102,7 @@ describe("POST /api/quiz/generate", () => {
 		const send = vi.fn();
 		const response = await postGenerate(
 			{ downloadUrls: ["https://r2.test/a.txt"] },
-			makeEnv({ API_BASE_URL: apiUrl, QUIZ_QUEUE: { send } }),
+			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
 		expect(send).not.toHaveBeenCalled();
@@ -98,7 +112,7 @@ describe("POST /api/quiz/generate", () => {
 		const send = vi.fn();
 		const response = await postGenerate(
 			{ ticket: "t-1", downloadUrls: [] },
-			makeEnv({ API_BASE_URL: apiUrl, QUIZ_QUEUE: { send } }),
+			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
 		expect(send).not.toHaveBeenCalled();
@@ -108,13 +122,13 @@ describe("POST /api/quiz/generate", () => {
 		const send = vi.fn();
 		const response = await postGenerate(
 			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"], options: { count: 999 } },
-			makeEnv({ API_BASE_URL: apiUrl, QUIZ_QUEUE: { send } }),
+			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
 	});
 
 	it("returns 401 when API project rejects the ticket", async () => {
-		stubFetch((url) => {
+		const apiWorker = makeApiWorker((url) => {
 			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
 				return jsonResponse({ error: "Ticket is already completed" }, 403);
 			}
@@ -124,14 +138,14 @@ describe("POST /api/quiz/generate", () => {
 		const send = vi.fn();
 		const response = await postGenerate(
 			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"] },
-			makeEnv({ API_BASE_URL: apiUrl, QUIZ_QUEUE: { send } }),
+			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(401);
 		expect(send).not.toHaveBeenCalled();
 	});
 
 	it("accepts valid ticket: verifies, enqueues, returns 202", async () => {
-		stubFetch((url) => {
+		const apiWorker = makeApiWorker((url) => {
 			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
 				return jsonResponse({ data: { status: "processing" } });
 			}
@@ -141,7 +155,7 @@ describe("POST /api/quiz/generate", () => {
 		const send = vi.fn();
 		const response = await postGenerate(
 			{ ticket: "t-1", downloadUrls: ["https://r2.test/a.txt"], options: { count: 8 } },
-			makeEnv({ API_BASE_URL: apiUrl, QUIZ_QUEUE: { send } }),
+			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(202);
 		expect(send).toHaveBeenCalledTimes(1);
@@ -243,17 +257,26 @@ describe("POST /api/ocr", () => {
 // ===== 队列消费者：文本通道完整管线 =====
 
 describe("queue consumer", () => {
-	const apiUrl = "https://api.test";
-
 	it("text channel: download -> generate -> validate -> upload", async () => {
 		const calls: string[] = [];
 		let uploadedBody: { questions?: unknown[] } | null = null;
 
-		stubFetch(async (url, init) => {
+		// Service Binding 回调（验票 / 入库）走 API_WORKER.fetch
+		const apiWorker = makeApiWorker(async (url, init) => {
 			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
 				calls.push("patch");
 				return jsonResponse({ data: { status: "processing" } });
 			}
+			if (url.includes("/api/quiz/questions/batch")) {
+				calls.push("batch");
+				uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
+				return jsonResponse({ data: { inserted: 2 } }, 201);
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		// 下载 + 模型调用走全局 fetch
+		stubFetch(async (url) => {
 			if (url === "https://r2.test/material.txt") {
 				calls.push("download");
 				return new Response("光合作用是植物利用光能将二氧化碳和水转化为有机物的过程。", {
@@ -264,15 +287,10 @@ describe("queue consumer", () => {
 				calls.push("llm");
 				return jsonResponse({ choices: [{ message: { content: VALID_QUESTIONS_JSON } }] });
 			}
-			if (url.includes("/api/quiz/questions/batch")) {
-				calls.push("batch");
-				uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
-				return jsonResponse({ data: { inserted: 2 } }, 201);
-			}
-			return new Response(`unexpected: ${url}`, { status: 599 });
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({ API_BASE_URL: apiUrl, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
 		const batch = {
 			messages: [
 				{
@@ -290,18 +308,22 @@ describe("queue consumer", () => {
 	it("unsupported format marks session failed without uploading", async () => {
 		const calls: string[] = [];
 
-		stubFetch(async (url) => {
+		const apiWorker = makeApiWorker(async (url) => {
 			if (url.includes("/sessions/") && url.endsWith("/status")) {
 				calls.push("patch");
 				return jsonResponse({ data: { status: "processing" } });
 			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		stubFetch(async (url) => {
 			if (url === "https://r2.test/doc.pdf") {
 				return new Response("fake-pdf", { headers: { "Content-Type": "application/pdf" } });
 			}
-			return new Response(`unexpected: ${url}`, { status: 599 });
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({ API_BASE_URL: apiUrl, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
 		const batch = {
 			messages: [{ body: { ticket: "t-2", downloadUrls: ["https://r2.test/doc.pdf"] } }],
 		} as unknown as MessageBatch<unknown>;

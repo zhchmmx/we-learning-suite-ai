@@ -78,13 +78,12 @@ app.post('/api/quiz/generate', async (c) => {
 	// 验票：借 API 项目的 PATCH 接口完成。假票 / 过期票当场被拒，
 	// 不会为无效任务浪费任何模型调用
 	try {
-		await patchSessionStatus(c.env.API_BASE_URL, ticket, 'processing');
+		await patchSessionStatus(c.env.API_WORKER, ticket, 'processing');
 	} catch (err) {
 		if (err instanceof ApiClientError && err.status >= 400 && err.status < 500) {
-			console.error('[401-debug] Ticket callback failed:', { status: err.status, message: err.message, apiBaseUrl: c.env.API_BASE_URL, ticket });
 			return c.json({ error: 'Invalid or expired ticket' }, 401);
 		}
-		console.error('[503-debug] Ticket verification error:', err instanceof Error ? { name: err.name, message: err.message, cause: err.cause, stack: err.stack } : String(err));
+		console.error('Ticket verification error:', err);
 		return c.json({ error: 'Service temporarily unavailable' }, 503);
 	}
 

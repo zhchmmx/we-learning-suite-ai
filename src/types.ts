@@ -19,7 +19,8 @@ export interface ProviderConfig {
 /** Hono 环境类型 */
 export type AppEnv = {
 	Bindings: {
-		API_BASE_URL: string;
+		/** Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库） */
+		API_WORKER: Fetcher;
 		AI_PROVIDERS: string;
 		QUIZ_QUEUE: Queue;
 	};

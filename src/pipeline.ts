@@ -20,7 +20,7 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 
 	// 1. 验票 + 状态确认（受理端点已 PATCH 过 processing，这里是消费开始前的复查，
 	//    防止 ticket 在排队期间过期或 session 已被其他路径终结）
-	await patchSessionStatus(env.API_BASE_URL, ticket, 'processing');
+	await patchSessionStatus(env.API_WORKER, ticket, 'processing');
 
 	// 2. 下载 + 格式分诊
 	const material = await downloadAndExtract(downloadUrls);
@@ -74,7 +74,7 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 	}
 
 	// 6. 入库（成功后 API 项目自动把 session 置为 completed，ticket 随即作废）
-	await uploadQuestions(env.API_BASE_URL, ticket, questions);
+	await uploadQuestions(env.API_WORKER, ticket, questions);
 	console.log(`Uploaded ${questions.length} questions for session ${ticket}`);
 }
 
@@ -101,7 +101,7 @@ export async function handleGenerateMessage(message: GenerateMessage, env: Bindi
 		// 其他（TaskError / 提供商链全部失败 / 下载失败等）：业务失败，标记 failed 后终结
 		console.error(`Generation task failed for session ${message.ticket}:`, err);
 		try {
-			await patchSessionStatus(env.API_BASE_URL, message.ticket, 'failed');
+			await patchSessionStatus(env.API_WORKER, message.ticket, 'failed');
 		} catch (markErr) {
 			console.error('Failed to mark session as failed:', markErr);
 		}

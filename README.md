@@ -16,18 +16,18 @@
 ```
 we-learning-suite-api ──Service Binding 内部直连──→ 本 Worker
   POST /api/quiz/generate { ticket, downloadUrls }
-  本 Worker：PATCH sessions/:ticket/status = processing（借 API 项目验票，假票当场被拒）
+  本 Worker：PATCH sessions/:ticket/status = processing（经 Service Binding 回调 API 项目验票，假票当场被拒）
             → 消息入队 → 立刻返回 202
   Queue 消费者：
-    1. 复查 ticket 状态
+    1. 复查 ticket 状态（经 Service Binding 回调）
     2. GET downloadUrls 下载文件（预签名 URL，不带任何认证头）
     3. 格式分诊：txt/md → 文本通道；jpg/png/webp → 图片通道；其他（含 PDF）→ 失败
     4. 图片 → OCR 模型转文字（每 5 张一批）；与文本合并为语料
     5. 语料超限（>60000 字符 / >15 张图）→ 失败
     6. 组提示词 → 按提供商优先级调 chat/completions（故障自动切换）
     7. 解析 JSON → 逐题校验 → 不合格丢弃 → 一道不剩则失败
-    8. POST /api/quiz/questions/batch 入库（API 项目自动置 session completed）
-    任何业务失败 → PATCH status=failed；API 项目 5xx/网络错 → 交给队列重试（最多 2 次）
+    8. POST /api/quiz/questions/batch 入库（经 Service Binding 回调，API 项目自动置 session completed）
+    任何业务失败 → PATCH status=failed（经 Service Binding）；API 项目 5xx/网络错 → 交给队列重试（最多 2 次）
 ```
 
 ## API
@@ -140,7 +140,7 @@ Content-Type: application/json
 
 | 变量 | 说明 |
 |------|------|
-| `API_BASE_URL` | we-learning-suite-api 的部署地址 |
+| `API_WORKER` | Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库） |
 | `AI_PROVIDERS` | 提供商列表 JSON（见上） |
 
 ### 2. Secrets
@@ -155,12 +155,11 @@ npx wrangler secret put AI_PROVIDER_KEY_MAIN
 `.dev.vars`（不要提交到版本库）：
 
 ```
-API_BASE_URL=http://127.0.0.1:8787
 AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://你的提供商/v1","generateModel":"Qwen3-235B-A22B","ocrModel":"PaddleOCR-VL-1.5"}]
 AI_PROVIDER_KEY_MAIN=sk-xxxx
 ```
 
-本地联调时两个 Worker 同时跑：本项目 `npx wrangler dev --port 8788`，API 项目 `npx wrangler dev`（默认 8787）。API 项目通过 Service Binding 连本 Worker，两边都在本地运行时 wrangler 会自动把绑定指向本地实例。
+本地联调时两个 Worker 同时跑：本项目 `npx wrangler dev --port 8788`，API 项目 `npx wrangler dev`（默认 8787）。两个方向都走 Service Binding（API→AI 和 AI→API），wrangler 会自动把绑定指向本地实例。
 
 ## 部署
 
