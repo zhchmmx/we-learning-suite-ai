@@ -17,7 +17,8 @@ export class ApiClientError extends Error {
 }
 
 async function callApi(baseUrl: string, path: string, ticket: string, method: string, body?: unknown): Promise<unknown> {
-	const res = await fetch(`${baseUrl.replace(/\/$/, '')}${path}`, {
+	const fullUrl = `${baseUrl.replace(/\/$/, '')}${path}`;
+	const res = await fetch(fullUrl, {
 		method,
 		headers: {
 			'Content-Type': 'application/json',
@@ -28,7 +29,8 @@ async function callApi(baseUrl: string, path: string, ticket: string, method: st
 	});
 
 	if (!res.ok) {
-		throw new ApiClientError(`API returned ${res.status} for ${method} ${path}`, res.status);
+		const resBody = await res.text().catch(() => '<unreadable>');
+		throw new ApiClientError(`API returned ${res.status} for ${method} ${fullUrl}\nResponse body: ${resBody.slice(0, 500)}`, res.status);
 	}
 
 	try {

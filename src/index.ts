@@ -81,6 +81,7 @@ app.post('/api/quiz/generate', async (c) => {
 		await patchSessionStatus(c.env.API_BASE_URL, ticket, 'processing');
 	} catch (err) {
 		if (err instanceof ApiClientError && err.status >= 400 && err.status < 500) {
+			console.error('[401-debug] Ticket callback failed:', { status: err.status, message: err.message, apiBaseUrl: c.env.API_BASE_URL, ticket });
 			return c.json({ error: 'Invalid or expired ticket' }, 401);
 		}
 		console.error('Ticket verification error:', err);
