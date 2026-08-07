@@ -9,9 +9,36 @@ import type { GeneratedQuestion } from '../types';
  * - true_false:     content { stem }                 + answer { correct }
  * - fill_blank:     content { stem }                 + answer { correct, accept[]? }
  * - short_answer:   content { stem }                 + answer { correct, accept[]? }
+ *
+ * 两阶段流程：
+ *   Phase 1 — 规划：模型分析材料，输出题目总数、题型分布等计划
+ *   Phase 2 — 分批生成：按计划每批生成固定数量，带上已生成题目摘要防重复
  */
 
-export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家。请根据用户提供的学习材料设计高质量的练习题。
+// ===== Phase 1: 规划 =====
+
+export interface GenerationPlan {
+	totalCount: number;
+	types: string[];
+}
+
+export const PLAN_SYSTEM_PROMPT = `你是一款学习应用的出题规划专家。请分析用户提供的学习材料，制定出题计划。
+
+输出要求（必须严格遵守）：
+1. 只输出一个 JSON 对象，不要输出任何解释、前言或 markdown 代码块标记。
+2. 结构为 { "totalCount": 数字, "types": ["题型1", "题型2", ...] }。
+3. totalCount：根据材料的篇幅和知识点密度，决定合适的题目总数（至少 3 题）。
+4. types：从材料内容特点出发，选择 2~4 种合适的题型，可选项：
+   "single_answer"（单选）、"multiple_answer"（多选）、"true_false"（判断）、
+   "fill_blank"（填空）、"short_answer"（简答）。`;
+
+export function buildPlanUserPrompt(materialText: string): string {
+	return `请分析以下学习材料，制定出题计划：\n\n${materialText}`;
+}
+
+// ===== Phase 2: 分批生成 =====
+
+export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家。请根据用户提供的学习材料和出题计划，设计高质量的练习题。
 
 输出要求（必须严格遵守）：
 1. 只输出一个 JSON 对象，不要输出任何解释、前言或 markdown 代码块标记。
@@ -35,10 +62,45 @@ export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家�
 4. 每道题可选 "tags" 字段：字符串数组，用于标注知识点标签。
 5. 题目内容必须严格来自所给材料，不得编造材料中不存在的事实。
 6. 根据材料特点选择题型，干扰项要有迷惑性但不能正确。
-7. 严禁输出上述五种以外的题型，否则该题将被丢弃。`;
+7. 严禁输出上述五种以外的题型，否则该题将被丢弃。
+8. 如果提供了"已生成题目"列表，请避免与它们重复——考查同一知识点时须换角度或换题型。`;
 
-export function buildUserPrompt(materialText: string): string {
-	return `请根据以下学习材料设计适量的练习题，题目数量由你根据材料的篇幅和知识点密度自行判断：\n\n${materialText}`;
+/**
+ * 构建分批生成的用户提示词。
+ * @param materialText 完整材料文本
+ * @param plan 规划结果
+ * @param batchIndex 当前批次序号（从 1 开始）
+ * @param batchSize 本批应生成题数
+ * @param totalBatches 总批次数
+ * @param previousStems 前面已生成题目的题干摘要（用于去重）
+ */
+export function buildBatchUserPrompt(
+	materialText: string,
+	plan: GenerationPlan,
+	batchIndex: number,
+	batchSize: number,
+	totalBatches: number,
+	previousStems: string[],
+): string {
+	let prompt = `出题计划：共 ${plan.totalCount} 题，题型从 [${plan.types.join(', ')}] 中选取。
+当前是第 ${batchIndex}/${totalBatches} 批，请生成本批的 ${batchSize} 道题。
+
+学习材料：
+${materialText}`;
+
+	if (previousStems.length > 0) {
+		prompt += `\n\n已生成的题目（请勿重复）：\n${previousStems.map((s, i) => `${i + 1}. ${s}`).join('\n')}`;
+	}
+
+	return prompt;
+}
+
+/** 从已生成题目中提取题干摘要（用于传给下一批做去重参考） */
+export function extractStems(questions: GeneratedQuestion[]): string[] {
+	return questions.map((q) => {
+		const stem = (q.content as Record<string, unknown>).stem;
+		return typeof stem === 'string' ? stem.slice(0, 80) : '';
+	}).filter(Boolean);
 }
 
 /**

@@ -29,14 +29,18 @@ export async function chatCompletion(opts: {
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	timeoutMs?: number;
+	maxTokens?: number;
 }): Promise<string> {
-	const { baseUrl, apiKey, model, messages, jsonOutput, allowEmpty, timeoutMs } = opts;
+	const { baseUrl, apiKey, model, messages, jsonOutput, allowEmpty, timeoutMs, maxTokens } = opts;
 	const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
 
 	const attempt = async (withResponseFormat: boolean): Promise<string> => {
 		const body: Record<string, unknown> = { model, messages };
 		if (withResponseFormat) {
 			body.response_format = { type: 'json_object' };
+		}
+		if (maxTokens) {
+			body.max_tokens = maxTokens;
 		}
 
 		const controller = new AbortController();

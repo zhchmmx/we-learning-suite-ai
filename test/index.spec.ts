@@ -247,14 +247,18 @@ describe("POST /api/ocr", () => {
 // ===== 队列消费者：R2 直读 → 文本通道完整管线 =====
 
 describe("queue consumer", () => {
-	it("text channel: read from R2 -> generate -> validate -> upload", async () => {
+	it("text channel: read from R2 -> plan -> generate -> validate -> upload", async () => {
 		const calls: string[] = [];
 		let uploadedBody: { questions?: unknown[] } | null = null;
+		let llmCallCount = 0;
 
 		// 把测试材料写入 R2 模拟桶
 		await env.R2_BUCKET.put("material.txt", "光合作用是植物利用光能将二氧化碳和水转化为有机物的过程。", {
 			httpMetadata: { contentType: "text/plain" },
 		});
+
+		// 规划阶段输出：2 道题，1 个批次即可生成完
+		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer", "true_false"] });
 
 		// Service Binding 回调（验票 / 入库）走 API_WORKER.fetch
 		const apiWorker = makeApiWorker(async (url, init) => {
@@ -270,11 +274,13 @@ describe("queue consumer", () => {
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		// 模型调用走全局 fetch
+		// 模型调用走全局 fetch：第 1 次返回规划，第 2 次返回题目
 		stubFetch(async (url) => {
 			if (url.includes("/chat/completions")) {
 				calls.push("llm");
-				return jsonResponse({ choices: [{ message: { content: VALID_QUESTIONS_JSON } }] });
+				llmCallCount++;
+				const content = llmCallCount === 1 ? PLAN_JSON : VALID_QUESTIONS_JSON;
+				return jsonResponse({ choices: [{ message: { content } }] });
 			}
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
@@ -290,7 +296,7 @@ describe("queue consumer", () => {
 
 		await worker.queue(batch, customEnv);
 
-		expect(calls).toEqual(["patch", "llm", "batch"]);
+		expect(calls).toEqual(["patch", "llm", "llm", "batch"]);
 		expect(uploadedBody?.questions).toHaveLength(2);
 	});
 

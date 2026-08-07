@@ -15,6 +15,15 @@ export const MAX_QUESTION_COUNT = 50;
 /** 每次 OCR 请求最多携带的图片数 */
 export const OCR_IMAGES_PER_CALL = 5;
 
+/** 分批生成：每批生成的题目数上限 */
+export const GENERATION_BATCH_SIZE = 15;
+
+/** 模型调用 max_tokens：规划阶段（输出很小） */
+export const PLAN_MAX_TOKENS = 4_000;
+
+/** 模型调用 max_tokens：分批生成阶段（每批最多 15 道题，需要足够空间输出完整 JSON） */
+export const GENERATION_MAX_TOKENS = 16_000;
+
 /** 模型调用超时（出题是长任务，给足时间） */
 export const MODEL_TIMEOUT_MS = 120_000;
 export const API_CALLBACK_TIMEOUT_MS = 15_000;
