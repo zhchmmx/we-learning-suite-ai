@@ -341,7 +341,7 @@ describe("queue consumer", () => {
 // ===== 题目校验规则 =====
 
 describe("validateQuestions", () => {
-	it("keeps valid questions of all three types", () => {
+	it("keeps valid questions of all five types", () => {
 		const parsed = parseModelJson(
 			JSON.stringify({
 				questions: [
@@ -350,16 +350,26 @@ describe("validateQuestions", () => {
 						content: { stem: "题", options: ["A", "B"] },
 						answer: { correctIndex: 0 },
 					},
+					{
+						type: "multiple_choice",
+						content: { stem: "多选题", options: ["A", "B", "C", "D"] },
+						answer: { correctIndices: [0, 2] },
+					},
 					{ type: "true_false", content: { stem: "陈述" }, answer: { correct: true } },
 					{
 						type: "fill_blank",
 						content: { stem: "法国首都是___" },
 						answer: { correct: "巴黎", accept: ["巴黎", "Paris"] },
 					},
+					{
+						type: "short_answer",
+						content: { stem: "简述光合作用的过程" },
+						answer: { correct: "植物利用光能将CO2和H2O转化为有机物和O2", accept: ["光合作用", "光反应", "暗反应"] },
+					},
 				],
 			}),
 		);
-		expect(validateQuestions(parsed)).toHaveLength(3);
+		expect(validateQuestions(parsed)).toHaveLength(5);
 	});
 
 	it("drops single_choice with out-of-range correctIndex", () => {
@@ -370,6 +380,60 @@ describe("validateQuestions", () => {
 						type: "single_choice",
 						content: { stem: "题", options: ["A", "B"] },
 						answer: { correctIndex: 5 },
+					},
+				],
+			}),
+		);
+		expect(validateQuestions(parsed)).toHaveLength(0);
+	});
+
+	it("drops multiple_choice with fewer than 2 correct indices", () => {
+		const parsed = parseModelJson(
+			JSON.stringify({
+				questions: [
+					{
+						type: "multiple_choice",
+						content: { stem: "题", options: ["A", "B", "C"] },
+						answer: { correctIndices: [0] },
+					},
+				],
+			}),
+		);
+		expect(validateQuestions(parsed)).toHaveLength(0);
+	});
+
+	it("drops multiple_choice with out-of-range or duplicate indices", () => {
+		const outOfRange = parseModelJson(
+			JSON.stringify({
+				questions: [{
+					type: "multiple_choice",
+					content: { stem: "题", options: ["A", "B", "C"] },
+					answer: { correctIndices: [0, 5] },
+				}],
+			}),
+		);
+		expect(validateQuestions(outOfRange)).toHaveLength(0);
+
+		const duplicate = parseModelJson(
+			JSON.stringify({
+				questions: [{
+					type: "multiple_choice",
+					content: { stem: "题", options: ["A", "B", "C"] },
+					answer: { correctIndices: [0, 0] },
+				}],
+			}),
+		);
+		expect(validateQuestions(duplicate)).toHaveLength(0);
+	});
+
+	it("drops short_answer with empty correct text", () => {
+		const parsed = parseModelJson(
+			JSON.stringify({
+				questions: [
+					{
+						type: "short_answer",
+						content: { stem: "什么是光合作用?" },
+						answer: { correct: "   " },
 					},
 				],
 			}),
