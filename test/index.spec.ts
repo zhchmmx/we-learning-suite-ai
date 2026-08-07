@@ -556,8 +556,8 @@ describe("validateQuestions", () => {
 					{ type: "true_false", content: { stem: "陈述" }, answer: { correct: true } },
 					{
 						type: "fill_blank",
-						content: { stem: "法国首都是___" },
-						answer: { correct: "巴黎", accept: ["巴黎", "Paris"] },
+						content: { stem: "___是法国首都，___是日本首都" },
+						answer: { correct: ["巴黎", "东京"], accept: [["巴黎", "Paris"], ["东京", "Tokyo"]] },
 					},
 					{
 						type: "short_answer",

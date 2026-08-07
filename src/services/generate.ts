@@ -7,7 +7,7 @@ import type { GeneratedQuestion } from '../types';
  * - single_answer:  content { stem, options[] }      + answer { correctIndex }
  * - multiple_answer: content { stem, options[] }     + answer { correctIndices[] }
  * - true_false:     content { stem }                 + answer { correct }
- * - fill_blank:     content { stem }                 + answer { correct, accept[]? }
+ * - fill_blank:     content { stem }                 + answer { correct[], accept[][] }
  * - short_answer:   content { stem }                 + answer { correct, accept[]? }
  *
  * 两阶段流程：
@@ -63,8 +63,11 @@ export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家�
      content 为 { "stem": 待判断的陈述 }
      answer 为 { "correct": 布尔值，表示该陈述是否正确 }
    - type 为 "fill_blank"（填空题）：
-     content 为 { "stem": 题干文本，用三个下划线 ___ 表示填空处 }
-     answer 为 { "correct": 标准答案文本, "accept": 可接受的答案字符串数组（必须包含标准答案） }
+     content 为 { "stem": 题干文本，每个填空处用 ___ 表示 }
+     answer 为 { "correct": [第1空标准答案, 第2空标准答案, ...], "accept": [[第1空可接受答案...], [第2空可接受答案...], ...] }
+     一道题既可以只有一个空，也可以有多个空，取决于题目本身需要考查的知识点数量。stem 中 ___ 的数量必须与 correct 数组长度一致；每个 accept[i] 必须包含对应的 correct[i]。
+     示例（单空）：content { "stem": "法国的首都是___" }, answer { "correct": ["巴黎"], "accept": [["巴黎", "Paris"]] }
+     示例（多空）：content { "stem": "___是法国首都，___是日本首都" }, answer { "correct": ["巴黎", "东京"], "accept": [["巴黎", "Paris"], ["东京", "Tokyo"]] }
    - type 为 "short_answer"（简答题）：
      content 为 { "stem": 问题文本 }
      answer 为 { "correct": 参考答案文本, "accept": 可接受的关键要点字符串数组（用于辅助判分，必须包含参考答案的核心表述） }
@@ -167,10 +170,15 @@ export function validateQuestions(parsed: unknown): GeneratedQuestion[] {
 			if (typeof a.correct !== 'boolean') continue;
 		} else if (type === 'fill_blank') {
 			if (typeof c.stem !== 'string' || !c.stem.trim()) continue;
-			if (typeof a.correct !== 'string' || !a.correct.trim()) continue;
-			if (a.accept !== undefined) {
-				if (!Array.isArray(a.accept) || a.accept.some((x) => typeof x !== 'string')) continue;
-			}
+			// correct: 非空字符串数组（每空的标准答案）
+			if (!Array.isArray(a.correct) || a.correct.length === 0) continue;
+			if (a.correct.some((b) => typeof b !== 'string' || !(b as string).trim())) continue;
+			// accept: 二维字符串数组，长度必须与 correct 一致
+			if (!Array.isArray(a.accept) || a.accept.length !== a.correct.length) continue;
+			if (a.accept.some((arr) => !Array.isArray(arr) || arr.some((x) => typeof x !== 'string'))) continue;
+			// stem 中 ___ 数量必须与 correct 长度一致
+			const blankCount = (c.stem.match(/_{3,}/g) || []).length;
+			if (blankCount !== a.correct.length) continue;
 		} else if (type === 'multiple_answer') {
 			if (typeof c.stem !== 'string' || !c.stem.trim()) continue;
 			if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 6) continue;
