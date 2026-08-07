@@ -65,7 +65,9 @@
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_classes": ["QuizGenerationDO"]
+			// 免费套餐要求 SQLite 存储后端（API 错误 10097）；
+			// storage API 与旧后端完全一致，alarm 行为不变
+			"new_sqlite_classes": ["QuizGenerationDO"]
 		}
 	],
 	"queues": {
