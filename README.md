@@ -86,13 +86,13 @@ Content-Type: application/json
 
 ## 题目输出格式
 
-与 we-learning-suite-api 的 `/api/quiz/questions/batch` 契约严格一致（三种题型，入库前逐题校验，不合格丢弃）：
+与 we-learning-suite-api 的 `/api/quiz/questions/batch` 契约严格一致（五种题型，入库前逐题校验，不合格丢弃）：
 
 ```json
 {
   "questions": [
     {
-      "type": "single_choice",
+      "type": "single_answer",
       "content": { "stem": "2+2等于?", "options": ["3", "4", "5", "6"] },
       "answer": { "correctIndex": 1 },
       "tags": ["数学"]

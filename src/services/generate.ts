@@ -4,8 +4,8 @@ import type { GeneratedQuestion } from '../types';
  * 出题：提示词构建 + 模型输出解析与校验。
  *
  * 题目结构与 we-learning-suite-api 的 README 契约严格一致：
- * - single_choice:  content { stem, options[] }      + answer { correctIndex }
- * - multiple_choice: content { stem, options[] }     + answer { correctIndices[] }
+ * - single_answer:  content { stem, options[] }      + answer { correctIndex }
+ * - multiple_answer: content { stem, options[] }     + answer { correctIndices[] }
  * - true_false:     content { stem }                 + answer { correct }
  * - fill_blank:     content { stem }                 + answer { correct, accept[]? }
  * - short_answer:   content { stem }                 + answer { correct, accept[]? }
@@ -17,10 +17,10 @@ export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家�
 1. 只输出一个 JSON 对象，不要输出任何解释、前言或 markdown 代码块标记。
 2. JSON 顶层结构为 { "questions": [ ... ] }。
 3. 每道题必须是以下五种题型之一：
-   - type 为 "single_choice"（单选题）：
+   - type 为 "single_answer"（单选题）：
      content 为 { "stem": 题干文本, "options": 选项数组（2~6 个字符串） }
      answer 为 { "correctIndex": 正确选项在 options 中的下标（从 0 开始的整数） }
-   - type 为 "multiple_choice"（多选题）：
+   - type 为 "multiple_answer"（多选题）：
      content 为 { "stem": 题干文本, "options": 选项数组（2~6 个字符串） }
      answer 为 { "correctIndices": 所有正确选项在 options 中的下标数组（从 0 开始的整数数组，至少 2 个） }
    - type 为 "true_false"（判断题）：
@@ -84,7 +84,7 @@ export function validateQuestions(parsed: unknown): GeneratedQuestion[] {
 		const c = content as Record<string, unknown>;
 		const a = answer as Record<string, unknown>;
 
-		if (type === 'single_choice') {
+		if (type === 'single_answer') {
 			if (typeof c.stem !== 'string' || !c.stem.trim()) continue;
 			if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 6) continue;
 			if (c.options.some((o) => typeof o !== 'string' || !(o as string).trim())) continue;
@@ -100,7 +100,7 @@ export function validateQuestions(parsed: unknown): GeneratedQuestion[] {
 			if (a.accept !== undefined) {
 				if (!Array.isArray(a.accept) || a.accept.some((x) => typeof x !== 'string')) continue;
 			}
-		} else if (type === 'multiple_choice') {
+		} else if (type === 'multiple_answer') {
 			if (typeof c.stem !== 'string' || !c.stem.trim()) continue;
 			if (!Array.isArray(c.options) || c.options.length < 2 || c.options.length > 6) continue;
 			if (c.options.some((o) => typeof o !== 'string' || !(o as string).trim())) continue;

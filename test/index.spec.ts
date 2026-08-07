@@ -45,7 +45,7 @@ function makeEnv(overrides: Record<string, unknown>): Env {
 const VALID_QUESTIONS_JSON = JSON.stringify({
 	questions: [
 		{
-			type: "single_choice",
+			type: "single_answer",
 			content: { stem: "2+2等于?", options: ["3", "4", "5"] },
 			answer: { correctIndex: 1 },
 			tags: ["数学"],
@@ -346,12 +346,12 @@ describe("validateQuestions", () => {
 			JSON.stringify({
 				questions: [
 					{
-						type: "single_choice",
+						type: "single_answer",
 						content: { stem: "题", options: ["A", "B"] },
 						answer: { correctIndex: 0 },
 					},
 					{
-						type: "multiple_choice",
+						type: "multiple_answer",
 						content: { stem: "多选题", options: ["A", "B", "C", "D"] },
 						answer: { correctIndices: [0, 2] },
 					},
@@ -372,12 +372,12 @@ describe("validateQuestions", () => {
 		expect(validateQuestions(parsed)).toHaveLength(5);
 	});
 
-	it("drops single_choice with out-of-range correctIndex", () => {
+	it("drops single_answer with out-of-range correctIndex", () => {
 		const parsed = parseModelJson(
 			JSON.stringify({
 				questions: [
 					{
-						type: "single_choice",
+						type: "single_answer",
 						content: { stem: "题", options: ["A", "B"] },
 						answer: { correctIndex: 5 },
 					},
@@ -387,12 +387,12 @@ describe("validateQuestions", () => {
 		expect(validateQuestions(parsed)).toHaveLength(0);
 	});
 
-	it("drops multiple_choice with fewer than 2 correct indices", () => {
+	it("drops multiple_answer with fewer than 2 correct indices", () => {
 		const parsed = parseModelJson(
 			JSON.stringify({
 				questions: [
 					{
-						type: "multiple_choice",
+						type: "multiple_answer",
 						content: { stem: "题", options: ["A", "B", "C"] },
 						answer: { correctIndices: [0] },
 					},
@@ -402,11 +402,11 @@ describe("validateQuestions", () => {
 		expect(validateQuestions(parsed)).toHaveLength(0);
 	});
 
-	it("drops multiple_choice with out-of-range or duplicate indices", () => {
+	it("drops multiple_answer with out-of-range or duplicate indices", () => {
 		const outOfRange = parseModelJson(
 			JSON.stringify({
 				questions: [{
-					type: "multiple_choice",
+					type: "multiple_answer",
 					content: { stem: "题", options: ["A", "B", "C"] },
 					answer: { correctIndices: [0, 5] },
 				}],
@@ -417,7 +417,7 @@ describe("validateQuestions", () => {
 		const duplicate = parseModelJson(
 			JSON.stringify({
 				questions: [{
-					type: "multiple_choice",
+					type: "multiple_answer",
 					content: { stem: "题", options: ["A", "B", "C"] },
 					answer: { correctIndices: [0, 0] },
 				}],
