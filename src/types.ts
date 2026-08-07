@@ -14,6 +14,8 @@ export interface ProviderConfig {
 	generateModel: string;
 	/** OCR 模型名（可选）。不填则图片 OCR 阶段自动跳过该提供商 */
 	ocrModel?: string;
+	/** 规划阶段专用模型名（可选）。不填则回落 generateModel */
+	planModel?: string;
 }
 
 /** 单个待处理材料（一个 R2 对象） */

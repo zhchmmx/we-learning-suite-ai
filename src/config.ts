@@ -21,6 +21,9 @@ export const GENERATION_BATCH_SIZE = 15;
 /** 模型调用 max_tokens：规划阶段（输出很小） */
 export const PLAN_MAX_TOKENS = 4_000;
 
+/** thinking 模型的规划阶段 max_tokens（思维链+答案一起算，需要更大空间） */
+export const PLAN_THINKING_MAX_TOKENS = 32_000;
+
 /** 模型调用 max_tokens：分批生成阶段（每批最多 15 道题，需要足够空间输出完整 JSON） */
 export const GENERATION_MAX_TOKENS = 16_000;
 
@@ -61,6 +64,7 @@ export function parseProviders(raw: string): ProviderConfig[] {
 			baseUrl: p.baseUrl,
 			generateModel: p.generateModel,
 			ocrModel: typeof p.ocrModel === 'string' && p.ocrModel ? p.ocrModel : undefined,
+			planModel: typeof p.planModel === 'string' && p.planModel ? p.planModel : undefined,
 		});
 	}
 	return valid.sort((a, b) => a.priority - b.priority);
