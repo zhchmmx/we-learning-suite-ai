@@ -53,6 +53,21 @@
 			"service": "we-learning-suite-api"
 		}
 	],
+	// Durable Object：每个出题任务一个实例，用 alarm 状态机绕过 900s wall time 限制
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "QUIZ_DO",
+				"class_name": "QuizGenerationDO"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_classes": ["QuizGenerationDO"]
+		}
+	],
 	"queues": {
 		// 受理端点把任务写入队列
 		"producers": [

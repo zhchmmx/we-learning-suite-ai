@@ -1,6 +1,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseProviders } from "../src/config";
+import { QuizGenerationDO } from "../src/do/quiz-generation";
 import { parseModelJson, validateQuestions } from "../src/services/generate";
 import { walkProviderChain } from "../src/services/providers";
 import worker from "../src/index";
@@ -254,12 +255,110 @@ describe("POST /api/ocr", () => {
 	});
 });
 
-// ===== 队列消费者：R2 直读 → 文本通道完整管线 =====
+// ===== 队列消费者：把任务转投 Durable Object 后立即 ack =====
 
 describe("queue consumer", () => {
-	it("text channel: read from R2 -> plan -> generate -> validate -> upload", async () => {
+	/** 假 DO 命名空间：捕获消费者对 stub.fetch 的调用，不真正启动 pool 的 DO 模拟 */
+	function makeFakeQuizDO(status: number) {
+		const fetchStub = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status }));
+		const namespace = {
+			idFromName: (name: string) => ({ name }),
+			get: (_id: unknown) => ({ fetch: fetchStub }),
+		} as unknown as Env["QUIZ_DO"];
+		return { namespace, fetchStub };
+	}
+
+	function makeBatch(ticket: string): MessageBatch<unknown> {
+		return {
+			messages: [{ body: { ticket, materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] } }],
+		} as unknown as MessageBatch<unknown>;
+	}
+
+	it("forwards queue messages to the Durable Object and acks", async () => {
+		const { namespace, fetchStub } = makeFakeQuizDO(202);
+		await worker.queue(makeBatch("t-q-1"), makeEnv({ QUIZ_DO: namespace }));
+
+		expect(fetchStub).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchStub.mock.calls[0];
+		expect(url).toBe("http://do/start");
+		expect(init?.method).toBe("POST");
+		expect(JSON.parse(String(init?.body))).toEqual({
+			ticket: "t-q-1",
+			materials: [{ r2Key: "a.txt", mimeType: "text/plain" }],
+		});
+	});
+
+	it("acks the message without retrying when the DO rejects a duplicate (409)", async () => {
+		const { namespace, fetchStub } = makeFakeQuizDO(409);
+		await expect(worker.queue(makeBatch("t-q-2"), makeEnv({ QUIZ_DO: namespace }))).resolves.toBeUndefined();
+		expect(fetchStub).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ===== QuizGenerationDO：alarm 状态机驱动完整管线 =====
+//
+// 直接实例化 DO 并用内存版 storage 驱动 alarm，不走 pool 的 DO 模拟：
+// vitest-pool-workers 在 Windows 上对 Durable Object SQLite 存储有兼容缺陷
+// （isolated storage pop 时 EBUSY / 关闭隔离后 SQLITE_CANTOPEN）。
+
+describe("QuizGenerationDO alarm state machine", () => {
+	type MockDOStateData = {
+		data: Map<string, unknown>;
+		pendingAlarm: number | null;
+	};
+
+	/** 内存版 DurableObjectState：get/put/delete/setAlarm 全部落到 Map 上 */
+	function makeMockDOState(): { state: DurableObjectState; mock: MockDOStateData } {
+		const mock: MockDOStateData = { data: new Map(), pendingAlarm: null };
+		const storage = {
+			get: async (key: string) => mock.data.get(key),
+			put: async (key: string, value: unknown) => {
+				mock.data.set(key, value);
+			},
+			delete: async (key: string) => {
+				mock.data.delete(key);
+			},
+			setAlarm: async (time: number) => {
+				mock.pendingAlarm = time;
+			},
+			getAlarm: async () => mock.pendingAlarm,
+		};
+		return { state: { storage } as unknown as DurableObjectState, mock };
+	}
+
+	/** 逐轮执行 alarm 处理器，直到没有已调度的 alarm 为止 */
+	async function runUntilIdle(instance: QuizGenerationDO, mock: MockDOStateData): Promise<void> {
+		let guard = 0;
+		while (mock.pendingAlarm !== null && guard++ < 20) {
+			mock.pendingAlarm = null;
+			await instance.alarm();
+		}
+		expect(mock.pendingAlarm).toBeNull();
+	}
+
+	/** 创建 DO 实例并投递任务（等价于队列消费者调用 stub.fetch） */
+	async function startTask(
+		customEnv: Env,
+		ticket: string,
+		materials: Array<{ r2Key: string; mimeType: string }>,
+	): Promise<{ instance: QuizGenerationDO; mock: MockDOStateData }> {
+		const { state, mock } = makeMockDOState();
+		const instance = new QuizGenerationDO(state, customEnv);
+		const res = await instance.fetch(
+			new Request("http://do/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ ticket, materials }),
+			}),
+		);
+		expect(res.status).toBe(202);
+		return { instance, mock };
+	}
+
+	it("text channel: plan -> generate -> validate -> upload, phase ends done", async () => {
 		const calls: string[] = [];
-		let uploadedBody: { questions?: unknown[] } | null = null;
+		// 用对象属性捕获上传内容：局部 let 在闭包中赋值会被 TS 控制流收窄为 null
+		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
 		let llmCallCount = 0;
 
 		// 把测试材料写入 R2 模拟桶
@@ -270,15 +369,19 @@ describe("queue consumer", () => {
 		// 规划阶段输出：2 道题，1 个批次即可生成完
 		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer", "true_false"] });
 
-		// Service Binding 回调（验票 / 入库）走 API_WORKER.fetch
+		// Service Binding 回调（续期 / 入库）走 API_WORKER.fetch
 		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.includes("/api/quiz/sessions/") && url.endsWith("/renew")) {
+				calls.push("renew");
+				return jsonResponse({ data: { ok: true } });
+			}
 			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
 				calls.push("patch");
-				return jsonResponse({ data: { status: "processing" } });
+				return jsonResponse({ data: { status: "failed" } });
 			}
 			if (url.includes("/api/quiz/questions/batch")) {
 				calls.push("batch");
-				uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
+				captured.uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
 				return jsonResponse({ data: { inserted: 2 } }, 201);
 			}
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
@@ -296,24 +399,23 @@ describe("queue consumer", () => {
 		});
 
 		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
-		const batch = {
-			messages: [
-				{
-					body: { ticket: "t-1", materials: [{ r2Key: "material.txt", mimeType: "text/plain" }] },
-				},
-			],
-		} as unknown as MessageBatch<unknown>;
+		const { instance, mock } = await startTask(customEnv, "t-do-1", [
+			{ r2Key: "material.txt", mimeType: "text/plain" },
+		]);
+		await runUntilIdle(instance, mock);
 
-		await worker.queue(batch, customEnv);
-
-		expect(calls).toEqual(["patch", "llm", "llm", "batch"]);
-		expect(uploadedBody?.questions).toHaveLength(2);
+		// planning(llm) → 续期 → 续期 → generating(llm) → uploading(batch)
+		expect(calls).toEqual(["llm", "renew", "renew", "llm", "batch"]);
+		expect(captured.uploadedBody?.questions).toHaveLength(2);
+		// 终态检查：任务完成、语料已释放
+		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
+		expect(mock.data.has("corpus")).toBe(false);
 	});
 
 	it("unsupported format marks session failed without uploading", async () => {
-		const calls: string[] = [];
+		const patches: Array<{ status: string }> = [];
 
-		// 使用内存 mock R2 bucket，避免 Windows 上 SQLite 文件锁问题
+		// 使用内存 mock R2 bucket，返回不支持的 PDF 格式
 		const mockR2 = {
 			async get(_key: string) {
 				return {
@@ -324,23 +426,113 @@ describe("queue consumer", () => {
 			},
 		} as unknown as R2Bucket;
 
-		const apiWorker = makeApiWorker(async (url) => {
+		const apiWorker = makeApiWorker(async (url, init) => {
 			if (url.includes("/sessions/") && url.endsWith("/status")) {
-				calls.push("patch");
-				return jsonResponse({ data: { status: "processing" } });
+				patches.push(JSON.parse(String(init?.body)) as { status: string });
+				return jsonResponse({ data: {} });
+			}
+			if (url.includes("/sessions/") && url.endsWith("/renew")) {
+				return jsonResponse({ data: { ok: true } });
 			}
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
 		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key", R2_BUCKET: mockR2 });
-		const batch = {
-			messages: [{ body: { ticket: "t-2", materials: [{ r2Key: "doc.pdf", mimeType: "application/pdf" }] } }],
-		} as unknown as MessageBatch<unknown>;
+		const { instance, mock } = await startTask(customEnv, "t-do-2", [
+			{ r2Key: "doc.pdf", mimeType: "application/pdf" },
+		]);
+		await runUntilIdle(instance, mock);
 
-		await worker.queue(batch, customEnv);
+		// 仅一次回调：规划阶段失败后标记 failed，没有入库
+		expect(patches).toEqual([{ status: "failed" }]);
+		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
+	});
 
-		// 首次 patch(processing) + 失败后 patch(failed)，且没有入库调用
-		expect(calls).toEqual(["patch", "patch"]);
+	it("cancellation: renew rejected with 4xx aborts the task without uploading", async () => {
+		const calls: string[] = [];
+
+		await env.R2_BUCKET.put("material-cancel.txt", "光合作用相关材料内容", {
+			httpMetadata: { contentType: "text/plain" },
+		});
+		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer"] });
+
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.endsWith("/renew")) {
+				calls.push("renew-rejected");
+				return jsonResponse({ error: "Session cancelled" }, 403);
+			}
+			if (url.endsWith("/status")) {
+				const body = JSON.parse(String(init?.body)) as { status: string };
+				calls.push(`patch-${body.status}`);
+				return jsonResponse({ data: {} });
+			}
+			if (url.includes("/questions/batch")) {
+				calls.push("batch");
+				return jsonResponse({ data: { inserted: 0 } }, 201);
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		stubFetch(async (url) => {
+			if (url.includes("/chat/completions")) {
+				calls.push("llm");
+				return sseResponse(PLAN_JSON);
+			}
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const { instance, mock } = await startTask(customEnv, "t-do-3", [
+			{ r2Key: "material-cancel.txt", mimeType: "text/plain" },
+		]);
+		await runUntilIdle(instance, mock);
+
+		// planning(llm) → 续期被 403 拒绝（取消信号）→ 中止 → 标记 failed，不再生成也不再上传
+		expect(calls).toEqual(["llm", "renew-rejected", "patch-failed"]);
+		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
+	});
+
+	it("duplicate delivery for the same ticket is rejected (idempotency guard)", async () => {
+		let llmCalls = 0;
+
+		await env.R2_BUCKET.put("material-dup.txt", "重复投递测试材料", {
+			httpMetadata: { contentType: "text/plain" },
+		});
+		const PLAN_JSON = JSON.stringify({ totalCount: 1, types: ["true_false"] });
+
+		const apiWorker = makeApiWorker(async (url) => {
+			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
+			if (url.endsWith("/status")) return jsonResponse({ data: {} });
+			if (url.includes("/questions/batch")) return jsonResponse({ data: { inserted: 1 } }, 201);
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		stubFetch(async (url) => {
+			if (url.includes("/chat/completions")) {
+				llmCalls++;
+				return sseResponse(llmCalls === 1 ? PLAN_JSON : VALID_QUESTIONS_JSON);
+			}
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const materials = [{ r2Key: "material-dup.txt", mimeType: "text/plain" }];
+		const { instance, mock } = await startTask(customEnv, "t-do-4", materials);
+		await runUntilIdle(instance, mock);
+		const llmCallsAfterFirstRun = llmCalls;
+		expect(llmCallsAfterFirstRun).toBeGreaterThanOrEqual(2);
+
+		// 第二次投递同一 ticket：任务已完成，DO 返回 409，不产生任何新调用
+		const dupRes = await instance.fetch(
+			new Request("http://do/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ ticket: "t-do-4", materials }),
+			}),
+		);
+		expect(dupRes.status).toBe(409);
+		await runUntilIdle(instance, mock);
+		expect(llmCalls).toBe(llmCallsAfterFirstRun);
 	});
 });
 

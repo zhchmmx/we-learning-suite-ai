@@ -24,7 +24,7 @@ export interface MaterialItem {
 	mimeType: string;
 }
 
-/** Hono 环境类型 */
+/** Hono 环境类型（仅覆盖 HTTP 路由用到的绑定；queue handler 与 DO 使用 wrangler 生成的 Env） */
 export type AppEnv = {
 	Bindings: {
 		/** Service Binding → we-learning-suite-api（验票 / 状态回写 / 题目入库） */

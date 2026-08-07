@@ -6,11 +6,13 @@ import {
 	MAX_MATERIALS,
 	parseProviders,
 } from './config';
-import { handleGenerateMessage } from './pipeline';
 import { ApiClientError, patchSessionStatus } from './services/api-client';
 import { ocrImages } from './services/ocr';
 import { walkProviderChain } from './services/providers';
 import type { AppEnv, GenerateMessage, MaterialItem } from './types';
+
+// wrangler 要求 Durable Object 类从入口模块导出（durable_objects.class_name 解析到这里）
+export { QuizGenerationDO } from './do/quiz-generation';
 
 /**
  * we-learning-suite-ai —— 出题 AI Worker 入口
@@ -152,10 +154,21 @@ export default {
 		return app.fetch(request, env, ctx);
 	},
 
-	/** Queue 消费者：出题任务异步执行 */
+	/** Queue 消费者：把任务交给 Durable Object，由 alarm 状态机驱动后续流程 */
 	async queue(batch, env): Promise<void> {
 		for (const message of batch.messages) {
-			await handleGenerateMessage(message.body as GenerateMessage, env);
+			const msg = message.body as GenerateMessage;
+			const stub = env.QUIZ_DO.get(env.QUIZ_DO.idFromName(msg.ticket));
+			const res = await stub.fetch('http://do/start', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(msg),
+			});
+			if (!res.ok) {
+				// DO 拒绝（任务已在跑 / 已完成）→ ack 消息，不重试
+				console.warn(`DO rejected message for ticket ${msg.ticket}: ${res.status}`);
+				continue;
+			}
 		}
 	},
 } satisfies ExportedHandler<Env>;
