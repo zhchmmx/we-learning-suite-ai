@@ -5,7 +5,7 @@ export const MAX_IMAGES = 15;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 单张 4MB（base64 编码是 CPU 操作，免费套餐要控制量）
 
 /** 文本通道限制（超过直接判失败，提示用户拆分） */
-export const MAX_TEXT_CHARS = 60_000;
+export const MAX_TEXT_CHARS = 120_000;
 
 /** 出题数量 */
 export const DEFAULT_QUESTION_COUNT = 5;
