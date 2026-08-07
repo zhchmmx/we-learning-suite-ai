@@ -1,9 +1,15 @@
 import type { ProviderConfig } from '../types';
 
 /**
- * 提供商链式路由：按 priority 依次尝试，任何失败（网络错 / 非 2xx / 解析错）
- * 立即切换下一家，每家只试一次，全部失败才抛出最后一个错误。
+ * 提供商链式路由：按 priority 依次尝试，每家最多重试 MAX_RETRIES 次，
+ * 全部失败才抛出最后一个错误。
  */
+
+/** 每个提供商的最大尝试次数 */
+const MAX_RETRIES = 3;
+
+/** 重试间隔（毫秒），每次翻倍 */
+const RETRY_BASE_DELAY_MS = 1_000;
 
 /** 根据提供商名取对应的 secret：AI_PROVIDER_KEY_<NAME 大写，非法字符转下划线> */
 export function getProviderKey(env: unknown, name: string): string | undefined {
@@ -35,12 +41,17 @@ export async function walkProviderChain<T>(
 			continue;
 		}
 
-		try {
-			const result = await task(provider, apiKey);
-			return { result, provider };
-		} catch (err) {
-			lastError = err;
-			console.error(`Provider "${provider.name}" failed, trying next if available:`, err);
+		for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+			try {
+				const result = await task(provider, apiKey);
+				return { result, provider };
+			} catch (err) {
+				lastError = err;
+				console.error(`Provider "${provider.name}" attempt ${attempt}/${MAX_RETRIES} failed:`, err);
+				if (attempt < MAX_RETRIES) {
+					await new Promise((r) => setTimeout(r, RETRY_BASE_DELAY_MS * attempt));
+				}
+			}
 		}
 	}
 

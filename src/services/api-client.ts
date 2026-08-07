@@ -53,6 +53,14 @@ export async function patchSessionStatus(
 }
 
 /**
+ * 续期 ticket：将 expires_at 往后推一个 TTL 周期。
+ * 在长时生成任务中定期调用，防止上传时 ticket 已过期。
+ */
+export async function renewTicket(fetcher: Fetcher, ticket: string): Promise<void> {
+	await callApi(fetcher, `/api/quiz/sessions/${ticket}/renew`, ticket, 'POST');
+}
+
+/**
  * 批量上传题目（上传成功后 API 项目会自动把 session 置为 completed）。
  */
 export async function uploadQuestions(

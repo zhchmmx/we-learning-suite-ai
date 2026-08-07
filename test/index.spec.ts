@@ -473,7 +473,7 @@ describe("walkProviderChain", () => {
 		});
 		expect(result).toBe("ok");
 		expect(provider.name).toBe("b");
-	});
+	}, 15_000);
 
 	it("throws when all providers fail", async () => {
 		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
@@ -482,7 +482,7 @@ describe("walkProviderChain", () => {
 				throw new Error("boom");
 			}),
 		).rejects.toThrow("boom");
-	});
+	}, 15_000);
 
 	it("skips providers without ocrModel when filter applied", async () => {
 		const withOcr = parseProviders(

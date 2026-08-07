@@ -1,6 +1,6 @@
 import { GENERATION_BATCH_SIZE, GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
 import { parseProviders } from './config';
-import { ApiClientError, patchSessionStatus, uploadQuestions } from './services/api-client';
+import { ApiClientError, patchSessionStatus, renewTicket, uploadQuestions } from './services/api-client';
 import { readFromR2, TaskError } from './services/extract';
 import {
 	buildBatchUserPrompt,
@@ -88,6 +88,14 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 	}
 	console.log(`Plan: ${plan.totalCount} questions, types=[${plan.types.join(', ')}]`);
 
+	// 续期 ticket（规划阶段可能已耗时较长）
+	try {
+		await renewTicket(env.API_WORKER, ticket);
+		console.log('Ticket renewed after planning phase');
+	} catch (err) {
+		console.error('Failed to renew ticket after planning:', err);
+	}
+
 	// 4b. Phase 2 — 分批生成：每批最多 GENERATION_BATCH_SIZE 道题
 	const totalBatches = Math.ceil(plan.totalCount / GENERATION_BATCH_SIZE);
 	const allQuestions: GeneratedQuestion[] = [];
@@ -120,6 +128,13 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 		allStems = extractStems(allQuestions);
 
 		console.log(`Batch ${batchIndex}: ${batchQuestions.length} valid questions (total so far: ${allQuestions.length})`);
+
+		// 每批完成后续期 ticket，防止长时间生成导致过期
+		try {
+			await renewTicket(env.API_WORKER, ticket);
+		} catch (err) {
+			console.error(`Failed to renew ticket after batch ${batchIndex}:`, err);
+		}
 	}
 
 	if (allQuestions.length === 0) {
