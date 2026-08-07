@@ -37,6 +37,16 @@ function jsonResponse(body: unknown, status = 200): Response {
 	});
 }
 
+/** 构造 SSE 流式响应（模拟 OpenAI streaming chat completion） */
+function sseResponse(content: string): Response {
+	const delta = JSON.stringify({ choices: [{ delta: { content } }] });
+	const body = `data: ${delta}\n\ndata: [DONE]\n\n`;
+	return new Response(body, {
+		status: 200,
+		headers: { "Content-Type": "text/event-stream" },
+	});
+}
+
 /** 构造带自定义绑定的测试 env（替换 Service Binding 与队列绑定，注入提供商密钥） */
 function makeEnv(overrides: Record<string, unknown>): Env {
 	return { ...env, ...overrides } as unknown as Env;
@@ -212,7 +222,7 @@ describe("POST /api/ocr", () => {
 	it("happy path: calls OCR model and returns text", async () => {
 		stubFetch((url) => {
 			if (url.includes("/chat/completions")) {
-				return jsonResponse({ choices: [{ message: { content: "转录出来的文字" } }] });
+				return sseResponse("转录出来的文字");
 			}
 			return new Response(`unexpected: ${url}`, { status: 599 });
 		});
@@ -230,7 +240,7 @@ describe("POST /api/ocr", () => {
 	it("returns 422 when OCR result is empty", async () => {
 		stubFetch((url) => {
 			if (url.includes("/chat/completions")) {
-				return jsonResponse({ choices: [{ message: { content: "   " } }] });
+				return sseResponse("   ");
 			}
 			return new Response(`unexpected: ${url}`, { status: 599 });
 		});
@@ -274,13 +284,13 @@ describe("queue consumer", () => {
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		// 模型调用走全局 fetch：第 1 次返回规划，第 2 次返回题目
+		// 模型调用走全局 fetch：第 1 次返回规划，第 2 次返回题目（流式 SSE）
 		stubFetch(async (url) => {
 			if (url.includes("/chat/completions")) {
 				calls.push("llm");
 				llmCallCount++;
 				const content = llmCallCount === 1 ? PLAN_JSON : VALID_QUESTIONS_JSON;
-				return jsonResponse({ choices: [{ message: { content } }] });
+				return sseResponse(content);
 			}
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});

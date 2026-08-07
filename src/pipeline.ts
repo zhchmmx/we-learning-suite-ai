@@ -89,11 +89,16 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 	console.log(`Plan: ${plan.totalCount} questions, types=[${plan.types.join(', ')}]`);
 
 	// 续期 ticket（规划阶段可能已耗时较长）
+	// 4xx = session 已被取消/失效 → 中止 pipeline；5xx = 暂态故障 → 记日志继续
 	try {
 		await renewTicket(env.API_WORKER, ticket);
 		console.log('Ticket renewed after planning phase');
 	} catch (err) {
-		console.error('Failed to renew ticket after planning:', err);
+		if (err instanceof ApiClientError && err.status < 500) {
+			console.warn('Ticket renewal rejected (4xx) after planning, session likely cancelled:', err.message);
+			throw err;
+		}
+		console.error('Failed to renew ticket after planning (non-fatal):', err);
 	}
 
 	// 4b. Phase 2 — 分批生成：每批最多 GENERATION_BATCH_SIZE 道题
@@ -130,10 +135,15 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 		console.log(`Batch ${batchIndex}: ${batchQuestions.length} valid questions (total so far: ${allQuestions.length})`);
 
 		// 每批完成后续期 ticket，防止长时间生成导致过期
+		// 4xx = session 已被取消/失效 → 中止 pipeline；5xx = 暂态故障 → 记日志继续
 		try {
 			await renewTicket(env.API_WORKER, ticket);
 		} catch (err) {
-			console.error(`Failed to renew ticket after batch ${batchIndex}:`, err);
+			if (err instanceof ApiClientError && err.status < 500) {
+				console.warn(`Ticket renewal rejected (4xx) after batch ${batchIndex}, session likely cancelled:`, err.message);
+				throw err;
+			}
+			console.error(`Failed to renew ticket after batch ${batchIndex} (non-fatal):`, err);
 		}
 	}
 

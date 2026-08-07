@@ -24,8 +24,8 @@ export const PLAN_MAX_TOKENS = 4_000;
 /** 模型调用 max_tokens：分批生成阶段（每批最多 15 道题，需要足够空间输出完整 JSON） */
 export const GENERATION_MAX_TOKENS = 16_000;
 
-/** 模型调用超时（出题是长任务，给足时间） */
-export const MODEL_TIMEOUT_MS = 120_000;
+/** 流式接收：最后一个 chunk 到达后，若超过此时间仍无新 chunk 则视为连接挂死，中止请求 */
+export const CHUNK_IDLE_TIMEOUT_MS = 30_000;
 export const API_CALLBACK_TIMEOUT_MS = 15_000;
 
 /** 受理端点校验 body 时材料的数量上限 */
