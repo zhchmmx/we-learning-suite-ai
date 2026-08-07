@@ -16,7 +16,6 @@ type Bindings = AppEnv['Bindings'];
  */
 export async function processGenerateMessage(message: GenerateMessage, env: Bindings): Promise<void> {
 	const { ticket, materials } = message;
-	const count = message.options?.count ?? 5;
 
 	// 1. 验票 + 状态确认（受理端点已 PATCH 过 processing，这里是消费开始前的复查，
 	//    防止 ticket 在排队期间过期或 session 已被其他路径终结）
@@ -60,7 +59,7 @@ export async function processGenerateMessage(message: GenerateMessage, env: Bind
 			model: p.generateModel,
 			messages: [
 				{ role: 'system', content: GENERATE_SYSTEM_PROMPT },
-				{ role: 'user', content: buildUserPrompt(corpus, count) },
+				{ role: 'user', content: buildUserPrompt(corpus) },
 			],
 			jsonOutput: true,
 		}),

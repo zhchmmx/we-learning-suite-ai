@@ -37,8 +37,8 @@ export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家�
 6. 根据材料特点选择题型，干扰项要有迷惑性但不能正确。
 7. 严禁输出上述五种以外的题型，否则该题将被丢弃。`;
 
-export function buildUserPrompt(materialText: string, count: number): string {
-	return `请根据以下学习材料设计 ${count} 道练习题：\n\n${materialText}`;
+export function buildUserPrompt(materialText: string): string {
+	return `请根据以下学习材料设计适量的练习题，题目数量由你根据材料的篇幅和知识点密度自行判断：\n\n${materialText}`;
 }
 
 /**

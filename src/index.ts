@@ -1,12 +1,9 @@
 import { Hono } from 'hono';
 import {
-	DEFAULT_QUESTION_COUNT,
 	IMAGE_MIME_TYPES,
 	MAX_IMAGE_BYTES,
 	MAX_IMAGES,
 	MAX_MATERIALS,
-	MAX_QUESTION_COUNT,
-	MIN_QUESTION_COUNT,
 	parseProviders,
 } from './config';
 import { handleGenerateMessage } from './pipeline';
@@ -37,7 +34,7 @@ app.get('/health', (c) =>
  * POST /api/quiz/generate
  * 受理出题任务（由 we-learning-suite-api 服务端调用，凭证 = ticket）
  *
- * Body: { ticket, materials: Array<{ r2Key: string, mimeType: string }>, options?: { count?: number } }
+ * Body: { ticket, materials: Array<{ r2Key: string, mimeType: string }> }
  * 流程：PATCH status=processing 验票 → 消息入队 → 立刻返回 202
  */
 app.post('/api/quiz/generate', async (c) => {
@@ -63,18 +60,6 @@ app.post('/api/quiz/generate', async (c) => {
 		return c.json({ error: `"materials" must be an array of 1~${MAX_MATERIALS} items each with "r2Key" and "mimeType"` }, 400);
 	}
 
-	let count = DEFAULT_QUESTION_COUNT;
-	if (body.options?.count !== undefined) {
-		const n = body.options.count;
-		if (typeof n !== 'number' || !Number.isInteger(n) || n < MIN_QUESTION_COUNT || n > MAX_QUESTION_COUNT) {
-			return c.json(
-				{ error: `"options.count" must be an integer between ${MIN_QUESTION_COUNT} and ${MAX_QUESTION_COUNT}` },
-				400,
-			);
-		}
-		count = n;
-	}
-
 	// 验票：借 API 项目的 PATCH 接口完成。假票 / 过期票当场被拒，
 	// 不会为无效任务浪费任何模型调用
 	try {
@@ -90,7 +75,6 @@ app.post('/api/quiz/generate', async (c) => {
 	const message: GenerateMessage = {
 		ticket,
 		materials: materials as MaterialItem[],
-		options: { count },
 	};
 	await c.env.QUIZ_QUEUE.send(message);
 

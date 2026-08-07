@@ -118,15 +118,6 @@ describe("POST /api/quiz/generate", () => {
 		expect(send).not.toHaveBeenCalled();
 	});
 
-	it("rejects out-of-range count with 400", async () => {
-		const send = vi.fn();
-		const response = await postGenerate(
-			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }], options: { count: 999 } },
-			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
-		);
-		expect(response.status).toBe(400);
-	});
-
 	it("returns 401 when API project rejects the ticket", async () => {
 		const apiWorker = makeApiWorker((url) => {
 			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
@@ -154,7 +145,7 @@ describe("POST /api/quiz/generate", () => {
 
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }], options: { count: 8 } },
+			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(202);
@@ -162,7 +153,6 @@ describe("POST /api/quiz/generate", () => {
 		expect(send).toHaveBeenCalledWith({
 			ticket: "t-1",
 			materials: [{ r2Key: "a.txt", mimeType: "text/plain" }],
-			options: { count: 8 },
 		});
 	});
 });
@@ -293,7 +283,7 @@ describe("queue consumer", () => {
 		const batch = {
 			messages: [
 				{
-					body: { ticket: "t-1", materials: [{ r2Key: "material.txt", mimeType: "text/plain" }], options: { count: 5 } },
+					body: { ticket: "t-1", materials: [{ r2Key: "material.txt", mimeType: "text/plain" }] },
 				},
 			],
 		} as unknown as MessageBatch<unknown>;
