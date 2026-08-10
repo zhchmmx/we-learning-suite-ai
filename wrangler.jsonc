@@ -68,10 +68,18 @@
 	},
 	"migrations": [
 		{
+			// 此 tag 已在线应用（当初仅注册 QuizGenerationDO）；
+			// 切勿改动已应用的迁移，Cloudflare 不会重新执行它。
 			"tag": "v1",
 			// 免费套餐要求 SQLite 存储后端（API 错误 10097）；
 			// storage API 与旧后端完全一致，alarm 行为不变
-			"new_sqlite_classes": ["QuizGenerationDO", "OCRProcessingDO"]
+			"new_sqlite_classes": ["QuizGenerationDO"]
+		},
+		{
+			// 新增迁移：补登 OCRProcessingDO。
+			// 原被错误地加进 v1，但 v1 早已应用过、不会重新执行，导致 10061。
+			"tag": "v2",
+			"new_sqlite_classes": ["OCRProcessingDO"]
 		}
 	],
 	"queues": {
