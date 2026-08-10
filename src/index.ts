@@ -4,15 +4,13 @@ import {
 	MAX_IMAGE_BYTES,
 	MAX_IMAGES,
 	MAX_MATERIALS,
-	parseProviders,
 } from './config';
 import { ApiClientError, patchSessionStatus } from './services/api-client';
-import { ocrImages } from './services/ocr';
-import { walkProviderChain } from './services/providers';
 import type { AppEnv, GenerateMessage, MaterialItem } from './types';
 
-// wrangler 要求 Durable Object 类从入口模块导出（durable_objects.class_name 解析到这里）
+// wrangler 要求 Durable Object 类从入口模块导出(durable_objects.class_name 解析到这里)
 export { QuizGenerationDO } from './do/quiz-generation';
+export { OCRProcessingDO } from './do/ocr-processing';
 
 /**
  * we-learning-suite-ai —— 出题 AI Worker 入口
@@ -85,11 +83,13 @@ app.post('/api/quiz/generate', async (c) => {
 
 /**
  * POST /api/ocr
- * 图片转文字。本 Worker 已关闭公网入口（workers_dev: false），
- * 只能由 we-learning-suite-api 通过 Service Binding 内部调用，因此无需额外鉴权。
+ * 图片转文字(异步)。
  *
  * Body: { images: [{ data: base64 字符串, mimeType: "image/jpeg"|"image/png"|"image/webp" }] }
- * 返回：{ data: { text } }
+ * 返回：{ data: { taskId, status: "processing" } }  ← 202
+ *
+ * 入参校验在 HTTP handler 里完成；实际 OCR 委托给 OCRProcessingDO(alarm 状态机)，
+ * 绕过普通 HTTP invocation 的 CPU 上限。客户端通过 GET /api/ocr/status/:taskId 轮询结果。
  *
  * 用途：客户端上传前把扫描件 PDF 渲染图 / 图片文件转成文字，
  * 保证服务端只存文本、出题管线只吃文本。
@@ -115,38 +115,87 @@ app.post('/api/ocr', async (c) => {
 		if (!IMAGE_MIME_TYPES.has(img.mimeType)) {
 			return c.json({ error: `Unsupported image type: ${img.mimeType}` }, 400);
 		}
-		// base64 长度 × 3/4 ≈ 原始字节数
 		if (Math.floor((img.data.length * 3) / 4) > MAX_IMAGE_BYTES) {
 			return c.json({ error: `Image exceeds ${MAX_IMAGE_BYTES / 1024 / 1024}MB limit` }, 400);
 		}
 		normalized.push({ base64: img.data, mimeType: img.mimeType });
 	}
 
-	let text: string;
+	// 委托给 OCRProcessingDO：入队 → alarm 分批 OCR
+	const taskId = `ocr_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+	const id = c.env.OCR_DO.idFromName(taskId);
+	const stub = c.env.OCR_DO.get(id);
+
 	try {
-		const { result } = await walkProviderChain(
-			c.env,
-			parseProviders(c.env.AI_PROVIDERS),
-			(provider, apiKey) =>
-				ocrImages({
-					baseUrl: provider.baseUrl,
-					apiKey,
-					model: provider.ocrModel as string,
-					images: normalized,
-				}),
-			(p) => !!p.ocrModel,
-		);
-		text = result;
+		await stub.fetch('http://do/ocr', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ taskId, images: normalized }),
+		});
 	} catch (err) {
-		console.error('OCR failed:', err);
-		return c.json({ error: 'OCR failed: no provider available' }, 502);
+		console.error('OCR DO dispatch failed:', err);
+		return c.json({ error: 'Failed to dispatch OCR task' }, 502);
 	}
 
-	if (!text.trim()) {
-		return c.json({ error: 'No recognizable text in the images' }, 422);
+	return c.json({ data: { taskId, status: 'processing' } }, 202);
+});
+
+/**
+ * GET /api/ocr/status/:taskId
+ * 轮询 OCR 任务进度和结果。
+ *
+ * 返回：
+ * - processing: { data: { status: "processing", progress: { batch, total } } }
+ * - done:       { data: { status: "done", text: "..." } }
+ * - failed:     { data: { status: "failed", error: "..." } }  ← 500
+ */
+app.get('/api/ocr/status/:taskId', async (c) => {
+	const taskId = c.req.param('taskId');
+	if (!taskId) {
+		return c.json({ error: 'taskId is required' }, 400);
 	}
 
-	return c.json({ data: { text } });
+	const id = c.env.OCR_DO.idFromName(taskId);
+	const stub = c.env.OCR_DO.get(id);
+
+	let res: Response;
+	try {
+		res = await stub.fetch('http://do/state');
+	} catch (err) {
+		console.error('OCR DO state query failed:', err);
+		return c.json({ error: 'Failed to query OCR task' }, 502);
+	}
+
+	const state = (await res.json()) as {
+		taskId: string;
+		phase: string;
+		batchIndex?: number;
+		totalBatches?: number;
+		result?: string;
+		error?: string;
+	};
+
+	if (res.status === 404) {
+		return c.json({ error: 'Task not found' }, 404);
+	}
+
+	if (state.phase === 'done') {
+		if (!state.result?.trim()) {
+			return c.json({ error: 'No recognizable text in the images' }, 422);
+		}
+		return c.json({ data: { status: 'done', text: state.result } });
+	}
+
+	if (state.phase === 'failed') {
+		return c.json({ data: { status: 'failed', error: state.error } }, 500);
+	}
+
+	return c.json({
+		data: {
+			status: 'processing',
+			progress: { batch: state.batchIndex ?? 0, total: state.totalBatches ?? 0 },
+		},
+	});
 });
 
 export default {

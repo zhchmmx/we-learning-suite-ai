@@ -35,6 +35,8 @@ export type AppEnv = {
 		R2_BUCKET: R2Bucket;
 		AI_PROVIDERS: string;
 		QUIZ_QUEUE: Queue;
+		/** OCR 异步处理 Durable Object */
+		OCR_DO: DurableObjectNamespace;
 	};
 	Variables: Record<string, never>;
 };
