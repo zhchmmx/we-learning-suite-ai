@@ -30,7 +30,7 @@
 		// 模型提供商列表（OpenAI 兼容端点），JSON 数组，数量不限，按 priority 升序尝试故障切换。
 		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
 		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
-		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"http://aigw.dlut.edu.cn/v1\",\"generateModel\":\"Qwen3.5-122B-A10B\",\"ocrModel\":\"PaddleOCR-VL-1.5\",\"planModel\":\"Qwen3-Next-80B-A3B-Thinking\"},{\"name\":\"deepseek\",\"priority\":2,\"baseUrl\":\"https://api.deepseek.com\",\"generateModel\":\"deepseek-v4-flash\"}]"
+		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"http://aigw.dlut.edu.cn/v1\",\"generateModel\":\"Qwen3.5-122B-A10B\",\"ocrModel\":\"PaddleOCR-VL-1.5\",\"planModel\":\"Qwen3-Next-80B-A3B-Thinking\"},{\"name\":\"mimo\",\"priority\":2,\"baseUrl\":\"https://api.xiaomimimo.com/v1\",\"generateModel\":\"mimo-v2.5-pro\",\"ocrModel\":\"mimo-v2.5\"},{\"name\":\"deepseek\",\"priority\":3,\"baseUrl\":\"https://api.deepseek.com\",\"generateModel\":\"deepseek-v4-flash\"}]",
 	},
 	/**
 	 * 以下变量通过 `npx wrangler secret put <NAME>` 设置，不写在配置文件里：
