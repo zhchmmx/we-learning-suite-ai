@@ -40,16 +40,21 @@ async function callApi(fetcher: Fetcher, path: string, ticket: string, method: s
 	}
 }
 
+/** 会话失败原因码（与 API Worker 的 FAIL_REASONS 白名单一致） */
+export type SessionFailReason = 'CONTENT_BLOCKED' | 'CONTENT_REVIEW_PENDING' | 'CONTENT_SCAN_UNAVAILABLE';
+
 /**
  * 更新 session 状态。
  * ticket 即 session id。
+ * reason 仅 status === 'failed' 时可携带（内容审核判定），API 端有白名单校验。
  */
 export async function patchSessionStatus(
 	fetcher: Fetcher,
 	ticket: string,
 	status: 'processing' | 'completed' | 'failed',
+	reason?: SessionFailReason,
 ): Promise<void> {
-	await callApi(fetcher, `/api/quiz/sessions/${ticket}/status`, ticket, 'PATCH', { status });
+	await callApi(fetcher, `/api/quiz/sessions/${ticket}/status`, ticket, 'PATCH', reason ? { status, reason } : { status });
 }
 
 /**

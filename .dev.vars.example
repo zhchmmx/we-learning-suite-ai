@@ -8,3 +8,10 @@ AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://your-provider.examp
 
 # 每家提供商一个 key：AI_PROVIDER_KEY_<NAME 大写，非字母数字转下划线>
 AI_PROVIDER_KEY_MAIN=sk-your-key-here
+
+# ── Waffo scan-prompt 内容审核（本地联调；生产私钥用 wrangler secret put --remote）──
+WAFFO_MERCHANT_ID=MER_366aA3JhhsRSJ7ffU8E2Wr
+# 商户私钥：裸 Base64 字符串（PKCS#8 DER），无 PEM 头尾
+WAFFO_PRIVATE_KEY=your-base64-private-key-here
+# 本地联调审核时打开；不填或 false 则跳过扫描
+CONTENT_SCAN_ENABLED=true

@@ -31,12 +31,26 @@
 		// 字段：name（唯一标识，决定 secret 名）/ priority（越小越优先）/ baseUrl /
 		//       generateModel（生成模型）/ ocrModel（可选，不填则 OCR 阶段跳过该家）
 		"AI_PROVIDERS": "[{\"name\":\"main\",\"priority\":1,\"baseUrl\":\"http://aigw.dlut.edu.cn/v1\",\"generateModel\":\"Qwen3.5-122B-A10B\",\"ocrModel\":\"PaddleOCR-VL-1.5\",\"planModel\":\"Qwen3-Next-80B-A3B-Thinking\"},{\"name\":\"mimo\",\"priority\":2,\"baseUrl\":\"https://api.xiaomimimo.com/v1\",\"generateModel\":\"mimo-v2.5-pro\",\"ocrModel\":\"mimo-v2.5\"},{\"name\":\"deepseek\",\"priority\":3,\"baseUrl\":\"https://api.deepseek.com\",\"generateModel\":\"deepseek-v4-flash\"}]",
+		// ── Waffo scan-prompt 内容审核 ──
+		// 商户 ID（非敏感，普通环境变量即可）
+		"WAFFO_MERCHANT_ID": "MER_366aA3JhhsRSJ7ffU8E2Wr",
+		// 扫描服务地址（沙箱可用时改这里）
+		"WAFFO_SCAN_BASE_URL": "https://api.waffo.ai",
+		// 内容审核总开关："true" 启用；出问题改回 "false" 即回到无审核原行为
+		"CONTENT_SCAN_ENABLED": "true",
+		// 单次扫描字符上限（API 硬上限 10000，留 1000 余量）
+		"SCAN_MAX_CHARS": "9000",
+		// 输入侧分块 / 输出侧逐题扫描的并发数
+		"SCAN_CONCURRENCY": "4",
+		// 单次扫描请求超时（毫秒）
+		"SCAN_TIMEOUT_MS": "15000"
 	},
 	/**
 	 * 以下变量通过 `npx wrangler secret put <NAME>` 设置，不写在配置文件里：
 	 * AI_PROVIDER_KEY_<NAME> - 每个提供商一个令牌，<NAME> 为提供商 name 的大写形式
 	 *                          （如 name=main 对应 AI_PROVIDER_KEY_MAIN；
 	 *                            name=deepseek 对应 AI_PROVIDER_KEY_DEEPSEEK）
+	 * WAFFO_PRIVATE_KEY      - Waffo 商户私钥（裸 Base64 字符串，PKCS#8 DER）
 	 */
 	// R2 对象存储绑定 —— 直接读取 API Worker 上传的文件（不走公网预签名 URL）
 	"r2_buckets": [

@@ -1,6 +1,7 @@
 import { GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS, PLAN_THINKING_MAX_TOKENS } from './config';
 import { parseProviders } from './config';
 import { uploadQuestions } from './services/api-client';
+import { scanCorpus } from './services/content-scan';
 import { readFromR2, TaskError } from './services/extract';
 import {
 	buildBatchUserPrompt,
@@ -54,6 +55,10 @@ export async function runPlanningPhase(
 	if (corpus.length > MAX_TEXT_CHARS) {
 		throw new TaskError(`材料文本超过上限（${MAX_TEXT_CHARS} 字符），请拆分文档后重试`);
 	}
+
+	// 内容审核（输入侧）：语料进入 LLM 前扫描，违规直接失败，
+	// 省掉规划 + 分批生成的模型消耗（OCR 已完成，其开销不可避免）
+	await scanCorpus(env, corpus, ticket);
 
 	// 调模型规划：分析材料，决定题目总数和题型分布
 	const providers = parseProviders(env.AI_PROVIDERS);

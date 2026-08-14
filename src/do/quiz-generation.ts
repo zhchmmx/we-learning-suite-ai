@@ -1,5 +1,6 @@
 import { runPlanningPhase, runBatchGenerationPhase, runUploadPhase } from '../pipeline';
 import { ApiClientError, patchSessionStatus, renewTicket } from '../services/api-client';
+import { ContentScanError, scanQuestionBatch } from '../services/content-scan';
 import { GENERATION_BATCH_SIZE } from '../config';
 import type { GenerationPlan } from '../services/generate';
 import type { GeneratedQuestion, MaterialItem } from '../types';
@@ -20,6 +21,8 @@ interface TaskState {
 	totalBatches: number;
 	allQuestions: GeneratedQuestion[];
 	allStems: string[];
+	/** 当前批是否已因输出侧内容审核 block 重生成过一次（每批最多一次） */
+	batchScanRetried: boolean;
 }
 
 /**
@@ -61,6 +64,7 @@ export class QuizGenerationDO implements DurableObject {
 			totalBatches: 0,
 			allQuestions: [],
 			allStems: [],
+			batchScanRetried: false,
 		};
 
 		await this.state.storage.put('task', task);
@@ -118,6 +122,23 @@ export class QuizGenerationDO implements DurableObject {
 					task.allStems,
 				);
 
+				// 内容审核（输出侧）：入库前扫描本批题目。
+				// block 且本批尚未重试过 → 重新生成同一批一次（batchIndex 不递增）；
+				// 其余审核失败（再次 block / review 未决 / 服务不可用）抛出，由 handleTaskError 置 failed
+				try {
+					await scanQuestionBatch(this.env, questions, task.ticket, task.batchIndex);
+				} catch (err) {
+					if (err instanceof ContentScanError && err.reasonCode === 'CONTENT_BLOCKED' && !task.batchScanRetried) {
+						console.warn(`Batch ${task.batchIndex} blocked by content scan, regenerating once`);
+						task.batchScanRetried = true;
+						await this.state.storage.put('task', task);
+						await this.scheduleAlarm();
+						return;
+					}
+					throw err;
+				}
+
+				task.batchScanRetried = false; // 本批通过审核，复位供下一批使用
 				task.allQuestions.push(...questions);
 				task.allStems = stems;
 				task.batchIndex++;
@@ -182,9 +203,11 @@ export class QuizGenerationDO implements DurableObject {
 			console.error(`Task failed for session ${task.ticket}:`, err);
 		}
 
-		// 尽力把 session 标记为 failed（可能也因同样原因失败，忽略）
+		// 尽力把 session 标记为 failed（可能也因同样原因失败，忽略）；
+		// 内容审核失败携带原因码，客户端据此展示对应文案
 		try {
-			await patchSessionStatus(this.env.API_WORKER, task.ticket, 'failed');
+			const reason = err instanceof ContentScanError ? err.reasonCode : undefined;
+			await patchSessionStatus(this.env.API_WORKER, task.ticket, 'failed', reason);
 		} catch {
 			// 忽略——API 可能不可达
 		}
