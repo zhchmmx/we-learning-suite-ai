@@ -2,10 +2,11 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage } from '../types';
 
 /**
- * AI Gateway HTTP 端点流式调用（OpenAI 兼容 /compat/ 路径）。
+ * AI Gateway 流式调用（Cloudflare 统一 AI 端点 + Gateway 路由）。
  * fetch + SSE 逐 chunk 拼接输出，空闲超时策略不变。
  *
- * /compat/ 端点保证返回 OpenAI 兼容格式：choices[0].delta.content
+ * 端点：api.cloudflare.com/client/v4/accounts/{id}/ai/v1/chat/completions
+ * 通过 cf-aig-gateway-id 头路由到 AI Gateway。
  */
 
 /** OpenAI 兼容格式的流式 delta */
@@ -45,7 +46,7 @@ export async function chatCompletion(opts: {
 	maxTokens?: number;
 }): Promise<string> {
 	const { accountId, aigToken, gatewayId, model, messages, customCost, jsonOutput, allowEmpty, maxTokens } = opts;
-	const url = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/compat/chat/completions`;
+	const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
 
 	if (jsonOutput) {
 		try {
@@ -75,6 +76,7 @@ export async function chatCompletion(opts: {
 			headers: {
 				'Content-Type': 'application/json',
 				Authorization: `Bearer ${aigToken}`,
+				'cf-aig-gateway-id': gatewayId,
 				'cf-aig-custom-cost': JSON.stringify({
 					per_token_in: customCost.perTokenIn,
 					per_token_out: customCost.perTokenOut,
