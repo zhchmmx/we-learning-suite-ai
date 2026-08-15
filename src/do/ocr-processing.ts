@@ -1,4 +1,4 @@
-import { OCR_IMAGES_PER_CALL } from '../config';
+import { COST_OCR, OCR_IMAGES_PER_CALL } from '../config';
 import { ocrImages } from '../services/ocr';
 
 /**
@@ -128,9 +128,11 @@ export class OCRProcessingDO implements DurableObject {
 			const batchImages = await this.readImageBatch(batchStart, batchEnd);
 
 			const text = await ocrImages({
-				ai: this.env.AI,
+				accountId: this.env.CF_ACCOUNT_ID,
+				aigToken: this.env.CF_AIG_TOKEN,
 				gatewayId: this.env.AI_GATEWAY_ID,
 				model: this.env.AI_OCR_MODEL,
+				customCost: COST_OCR,
 				images: batchImages,
 			});
 

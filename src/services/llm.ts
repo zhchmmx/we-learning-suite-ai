@@ -2,17 +2,14 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage } from '../types';
 
 /**
- * Workers AI 流式调用（通过 AI Gateway 路由）。
- * env.AI.run() + stream:true 返回 ReadableStream，SSE 格式。
- * 逐 chunk 拼接输出，空闲超时策略与原实现一致。
+ * AI Gateway HTTP 端点流式调用（OpenAI 兼容 /compat/ 路径）。
+ * fetch + SSE 逐 chunk 拼接输出，空闲超时策略不变。
  *
- * SSE chunk 兼容两种格式：
- * - Workers AI 原生：delta.response
- * - OpenAI 兼容（自定义提供商通过 Gateway）：choices[0].delta.content
+ * /compat/ 端点保证返回 OpenAI 兼容格式：choices[0].delta.content
  */
 
 /** OpenAI 兼容格式的流式 delta */
-interface OpenAIStreamDelta {
+interface StreamDelta {
 	choices?: Array<{
 		delta?: {
 			content?: string | null;
@@ -20,9 +17,10 @@ interface OpenAIStreamDelta {
 	}>;
 }
 
-/** Workers AI 原生格式的流式 delta */
-interface NativeStreamDelta {
-	response?: string;
+/** 自定义成本（cf-aig-custom-cost 请求头） */
+export interface CustomCost {
+	perTokenIn: number;
+	perTokenOut: number;
 }
 
 /**
@@ -30,19 +28,24 @@ interface NativeStreamDelta {
  * 任何错误 / 空输出 / 超时都抛错（由 Gateway 负责 fallback）。
  *
  * @param jsonOutput 请求 JSON 输出模式。若模型不认识 response_format 参数
- *                   （抛错），自动去掉该参数重试一次再判断失败。
+ *                   （返回 400），自动去掉该参数重试一次再判断失败。
  * @param allowEmpty 允许空输出（OCR 场景：图片里没有文字时模型正常返回空内容，不算失败）
+ * @param customCost 自定义成本，通过 cf-aig-custom-cost 头传给 Gateway，
+ *                   仅影响仪表盘成本展示，不改变实际计费。
  */
 export async function chatCompletion(opts: {
-	ai: Ai;
+	accountId: string;
+	aigToken: string;
 	gatewayId: string;
 	model: string;
 	messages: ChatMessage[];
+	customCost: CustomCost;
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	maxTokens?: number;
 }): Promise<string> {
-	const { ai, gatewayId, model, messages, jsonOutput, allowEmpty, maxTokens } = opts;
+	const { accountId, aigToken, gatewayId, model, messages, customCost, jsonOutput, allowEmpty, maxTokens } = opts;
+	const url = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/compat/chat/completions`;
 
 	if (jsonOutput) {
 		try {
@@ -59,21 +62,39 @@ export async function chatCompletion(opts: {
 
 	/** 执行一次流式调用，拼接并返回完整文本 */
 	async function doCall(withResponseFormat: boolean): Promise<string> {
-		const input: Record<string, unknown> = { messages, stream: true };
+		const body: Record<string, unknown> = { model, messages, stream: true };
 		if (withResponseFormat) {
-			input.response_format = { type: 'json_object' };
+			body.response_format = { type: 'json_object' };
 		}
 		if (maxTokens) {
-			input.max_tokens = maxTokens;
+			body.max_tokens = maxTokens;
 		}
 
-		const stream = await ai.run(
-			model,
-			input,
-			{ gateway: { id: gatewayId } },
-		) as unknown as ReadableStream;
+		const res = await fetch(url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${aigToken}`,
+				'cf-aig-custom-cost': JSON.stringify({
+					per_token_in: customCost.perTokenIn,
+					per_token_out: customCost.perTokenOut,
+				}),
+			},
+			body: JSON.stringify(body),
+		});
 
-		const reader = stream.getReader();
+		if (!res.ok) {
+			const err = new Error(`chat/completions returned ${res.status} (model=${model})`);
+			(err as Error & { status?: number }).status = res.status;
+			throw err;
+		}
+
+		if (!res.body) {
+			throw new Error(`chat/completions returned no body (model=${model})`);
+		}
+
+		// 流式读取 SSE
+		const reader = res.body.getReader();
 		const decoder = new TextDecoder();
 		let accumulated = '';
 		let buffer = ''; // 跨 chunk 的行缓冲区
@@ -97,14 +118,8 @@ export async function chatCompletion(opts: {
 						if (payload === '[DONE]') continue;
 
 						try {
-							const parsed = JSON.parse(payload);
-							// 兼容 Workers AI 原生格式和 OpenAI 兼容格式
-							const text =
-								(typeof (parsed as NativeStreamDelta).response === 'string'
-									? (parsed as NativeStreamDelta).response
-									: null)
-								?? (parsed as OpenAIStreamDelta).choices?.[0]?.delta?.content
-								?? null;
+							const delta = JSON.parse(payload) as StreamDelta;
+							const text = delta.choices?.[0]?.delta?.content;
 							if (typeof text === 'string') {
 								accumulated += text;
 							}

@@ -36,3 +36,12 @@ export const MAX_MATERIALS = 50;
 export const TEXT_MIME_TYPES = new Set(['text/plain', 'text/markdown', 'text/x-markdown']);
 export const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+/**
+ * 自定义成本追踪（cf-aig-custom-cost 请求头）。
+ * 仅影响 Gateway 仪表盘的成本展示，不改变实际计费。
+ * 值为每 token 价格（= 每百万价格 ÷ 1,000,000）。
+ */
+export const COST_PLAN = { perTokenIn: 0.0000004196, perTokenOut: 0.0000008392 };
+export const COST_GENERATE = { perTokenIn: 0.0000004196, perTokenOut: 0.0000008392 };
+export const COST_OCR = { perTokenIn: 0.0000001399, perTokenOut: 0.0000002797 };
+
