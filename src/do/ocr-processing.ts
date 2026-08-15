@@ -1,6 +1,5 @@
-import { OCR_IMAGES_PER_CALL, parseProviders } from '../config';
+import { OCR_IMAGES_PER_CALL } from '../config';
 import { ocrImages } from '../services/ocr';
-import { walkProviderChain } from '../services/providers';
 
 /**
  * OCR Processing Durable Object
@@ -128,19 +127,12 @@ export class OCRProcessingDO implements DurableObject {
 			const batchEnd = Math.min(batchStart + OCR_IMAGES_PER_CALL, task.imageCount);
 			const batchImages = await this.readImageBatch(batchStart, batchEnd);
 
-			const providers = parseProviders(this.env.AI_PROVIDERS);
-			const { result: text } = await walkProviderChain(
-				this.env,
-				providers,
-				(provider, apiKey) =>
-					ocrImages({
-						baseUrl: provider.baseUrl,
-						apiKey,
-						model: provider.ocrModel as string,
-						images: batchImages,
-					}),
-				(p) => !!p.ocrModel,
-			);
+			const text = await ocrImages({
+				ai: this.env.AI,
+				gatewayId: this.env.AI_GATEWAY_ID,
+				model: this.env.AI_OCR_MODEL,
+				images: batchImages,
+			});
 
 			if (text.trim()) {
 				task.results.push(text.trim());

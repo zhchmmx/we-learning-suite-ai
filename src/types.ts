@@ -2,22 +2,6 @@
  * 类型定义
  */
 
-/** 单个模型提供商配置（AI_PROVIDERS JSON 数组的一项） */
-export interface ProviderConfig {
-	/** 唯一标识，决定对应 secret 名：AI_PROVIDER_KEY_<NAME 大写> */
-	name: string;
-	/** 优先级，越小越先尝试 */
-	priority: number;
-	/** OpenAI 兼容 base URL，如 https://api.deepseek.com/v1 */
-	baseUrl: string;
-	/** 生成题目用的模型名 */
-	generateModel: string;
-	/** OCR 模型名（可选）。不填则图片 OCR 阶段自动跳过该提供商 */
-	ocrModel?: string;
-	/** 规划阶段专用模型名（可选）。不填则回落 generateModel */
-	planModel?: string;
-}
-
 /** 单个待处理材料（一个 R2 对象） */
 export interface MaterialItem {
 	/** R2 对象 key */
@@ -33,7 +17,16 @@ export type AppEnv = {
 		API_WORKER: Fetcher;
 		/** R2 对象存储绑定（与 we-learning-suite-api 共享同一个 bucket） */
 		R2_BUCKET: R2Bucket;
-		AI_PROVIDERS: string;
+		/** Workers AI 绑定（通过 AI Gateway 路由） */
+		AI: Ai;
+		/** AI Gateway 路由名 —— 生成阶段 */
+		AI_GENERATE_MODEL: string;
+		/** AI Gateway 路由名 —— OCR 阶段 */
+		AI_OCR_MODEL: string;
+		/** AI Gateway 路由名 —— 规划阶段 */
+		AI_PLAN_MODEL: string;
+		/** AI Gateway ID */
+		AI_GATEWAY_ID: string;
 		QUIZ_QUEUE: Queue;
 		/** OCR 异步处理 Durable Object */
 		OCR_DO: DurableObjectNamespace;

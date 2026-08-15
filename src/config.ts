@@ -1,5 +1,3 @@
-import type { ProviderConfig } from './types';
-
 /** 图片通道限制 */
 export const MAX_IMAGES = 15;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 单张 4MB（base64 编码是 CPU 操作，免费套餐要控制量）
@@ -38,34 +36,3 @@ export const MAX_MATERIALS = 50;
 export const TEXT_MIME_TYPES = new Set(['text/plain', 'text/markdown', 'text/x-markdown']);
 export const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
-/**
- * 解析 AI_PROVIDERS JSON 配置。
- * 非法条目静默丢弃，结果按 priority 升序排列。
- */
-export function parseProviders(raw: string): ProviderConfig[] {
-	let list: unknown;
-	try {
-		list = JSON.parse(raw);
-	} catch {
-		return [];
-	}
-	if (!Array.isArray(list)) return [];
-
-	const valid: ProviderConfig[] = [];
-	for (const item of list) {
-		if (!item || typeof item !== 'object') continue;
-		const p = item as Record<string, unknown>;
-		if (typeof p.name !== 'string' || !p.name) continue;
-		if (typeof p.baseUrl !== 'string' || !p.baseUrl.startsWith('http')) continue;
-		if (typeof p.generateModel !== 'string' || !p.generateModel) continue;
-		valid.push({
-			name: p.name,
-			priority: typeof p.priority === 'number' ? p.priority : 999,
-			baseUrl: p.baseUrl,
-			generateModel: p.generateModel,
-			ocrModel: typeof p.ocrModel === 'string' && p.ocrModel ? p.ocrModel : undefined,
-			planModel: typeof p.planModel === 'string' && p.planModel ? p.planModel : undefined,
-		});
-	}
-	return valid.sort((a, b) => a.priority - b.priority);
-}

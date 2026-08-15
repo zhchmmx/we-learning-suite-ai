@@ -2,13 +2,17 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage } from '../types';
 
 /**
- * OpenAI 兼容 chat completions 流式调用。
- * 请求 stream: true，通过 SSE 逐 chunk 拼接输出，
- * 超时策略为"空闲超时"——最后一个 chunk 到达后若超过
- * CHUNK_IDLE_TIMEOUT_MS 仍无新 chunk 则中止。
+ * Workers AI 流式调用（通过 AI Gateway 路由）。
+ * env.AI.run() + stream:true 返回 ReadableStream，SSE 格式。
+ * 逐 chunk 拼接输出，空闲超时策略与原实现一致。
+ *
+ * SSE chunk 兼容两种格式：
+ * - Workers AI 原生：delta.response
+ * - OpenAI 兼容（自定义提供商通过 Gateway）：choices[0].delta.content
  */
 
-interface StreamDelta {
+/** OpenAI 兼容格式的流式 delta */
+interface OpenAIStreamDelta {
 	choices?: Array<{
 		delta?: {
 			content?: string | null;
@@ -16,86 +20,70 @@ interface StreamDelta {
 	}>;
 }
 
+/** Workers AI 原生格式的流式 delta */
+interface NativeStreamDelta {
+	response?: string;
+}
+
 /**
  * 调用一次 chat completions（流式），返回模型输出的完整文本。
- * 任何非 2xx / 空输出 / 超时都抛错（由上层做提供商切换）。
+ * 任何错误 / 空输出 / 超时都抛错（由 Gateway 负责 fallback）。
  *
- * @param jsonOutput 请求 JSON 输出模式。若提供商不认识 response_format 参数
- *                   （返回 400），自动去掉该参数重试一次再判断失败。
+ * @param jsonOutput 请求 JSON 输出模式。若模型不认识 response_format 参数
+ *                   （抛错），自动去掉该参数重试一次再判断失败。
  * @param allowEmpty 允许空输出（OCR 场景：图片里没有文字时模型正常返回空内容，不算失败）
  */
 export async function chatCompletion(opts: {
-	baseUrl: string;
-	apiKey: string;
+	ai: Ai;
+	gatewayId: string;
 	model: string;
 	messages: ChatMessage[];
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	maxTokens?: number;
 }): Promise<string> {
-	const { baseUrl, apiKey, model, messages, jsonOutput, allowEmpty, maxTokens } = opts;
-	const url = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+	const { ai, gatewayId, model, messages, jsonOutput, allowEmpty, maxTokens } = opts;
 
-	const attempt = async (withResponseFormat: boolean): Promise<string> => {
-		const body: Record<string, unknown> = { model, messages, stream: true };
+	if (jsonOutput) {
+		try {
+			return await doCall(true);
+		} catch (err) {
+			// 模型不支持 response_format：去掉参数重试一次
+			if (isUnsupportedError(err)) {
+				return doCall(false);
+			}
+			throw err;
+		}
+	}
+	return doCall(false);
+
+	/** 执行一次流式调用，拼接并返回完整文本 */
+	async function doCall(withResponseFormat: boolean): Promise<string> {
+		const input: Record<string, unknown> = { messages, stream: true };
 		if (withResponseFormat) {
-			body.response_format = { type: 'json_object' };
+			input.response_format = { type: 'json_object' };
 		}
 		if (maxTokens) {
-			body.max_tokens = maxTokens;
+			input.max_tokens = maxTokens;
 		}
 
-		const controller = new AbortController();
-		// 空闲超时：初始给一个较长的首 chunk 等待时间
-		let idleTimer: ReturnType<typeof setTimeout> | null = null;
-		const resetIdleTimer = () => {
-			if (idleTimer) clearTimeout(idleTimer);
-			idleTimer = setTimeout(() => controller.abort(), CHUNK_IDLE_TIMEOUT_MS);
-		};
-		const clearIdleTimer = () => {
-			if (idleTimer) {
-				clearTimeout(idleTimer);
-				idleTimer = null;
-			}
-		};
+		const stream = await ai.run(
+			model,
+			input,
+			{ gateway: { id: gatewayId } },
+		) as unknown as ReadableStream;
+
+		const reader = stream.getReader();
+		const decoder = new TextDecoder();
+		let accumulated = '';
+		let buffer = ''; // 跨 chunk 的行缓冲区
 
 		try {
-			const res = await fetch(url, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					Authorization: `Bearer ${apiKey}`,
-				},
-				body: JSON.stringify(body),
-				signal: controller.signal,
-			});
-
-			if (!res.ok) {
-				const err = new Error(`chat/completions returned ${res.status} (model=${model})`);
-				(err as Error & { status?: number }).status = res.status;
-				throw err;
-			}
-
-			if (!res.body) {
-				throw new Error(`chat/completions returned no body (model=${model})`);
-			}
-
-			// 流式读取 SSE
-			const reader = res.body.getReader();
-			const decoder = new TextDecoder();
-			let accumulated = '';
-			let buffer = ''; // 跨 chunk 的行缓冲区
-
-			resetIdleTimer();
-
 			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
+				const chunk = await readWithIdleTimeout(reader);
+				if (chunk === null) break; // 流结束
 
-				// 收到数据，重置空闲计时器
-				resetIdleTimer();
-
-				buffer += decoder.decode(value, { stream: true });
+				buffer += decoder.decode(chunk, { stream: true });
 
 				// 按双换行切分 SSE 事件
 				const events = buffer.split('\n\n');
@@ -109,41 +97,66 @@ export async function chatCompletion(opts: {
 						if (payload === '[DONE]') continue;
 
 						try {
-							const delta = JSON.parse(payload) as StreamDelta;
-							const chunk = delta.choices?.[0]?.delta?.content;
-							if (typeof chunk === 'string') {
-								accumulated += chunk;
+							const parsed = JSON.parse(payload);
+							// 兼容 Workers AI 原生格式和 OpenAI 兼容格式
+							const text =
+								(typeof (parsed as NativeStreamDelta).response === 'string'
+									? (parsed as NativeStreamDelta).response
+									: null)
+								?? (parsed as OpenAIStreamDelta).choices?.[0]?.delta?.content
+								?? null;
+							if (typeof text === 'string') {
+								accumulated += text;
 							}
 						} catch {
-							// 忽略无法解析的行（某些提供商会在 SSE 里夹注释行）
+							// 忽略无法解析的行
 						}
 					}
 				}
 			}
-
-			clearIdleTimer();
-
-			if (!allowEmpty && !accumulated.trim()) {
-				throw new Error(`chat/completions returned empty content (model=${model})`);
-			}
-			return accumulated;
 		} finally {
-			clearIdleTimer();
+			reader.cancel().catch(() => {});
 		}
-	};
 
-	if (jsonOutput) {
-		try {
-			return await attempt(true);
-		} catch (err) {
-			// 提供商不支持 response_format：去掉参数重试一次
-			const status = (err as Error & { status?: number }).status;
-			if (status === 400) {
-				return attempt(false);
-			}
-			throw err;
+		if (!allowEmpty && !accumulated.trim()) {
+			throw new Error(`AI returned empty content (model=${model})`);
 		}
+		return accumulated;
 	}
+}
 
-	return attempt(false);
+/**
+ * 带空闲超时的 stream reader.read()。
+ * 返回 null 表示流结束（done）；超时则抛错。
+ */
+async function readWithIdleTimeout(
+	reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<Uint8Array | null> {
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const result = await Promise.race([
+			reader.read(),
+			new Promise<never>((_, reject) => {
+				timeoutId = setTimeout(
+					() => reject(new Error(`Stream idle timeout after ${CHUNK_IDLE_TIMEOUT_MS}ms`)),
+					CHUNK_IDLE_TIMEOUT_MS,
+				);
+			}),
+		]);
+		return result.done ? null : result.value;
+	} finally {
+		if (timeoutId !== undefined) clearTimeout(timeoutId);
+	}
+}
+
+/**
+ * 判断错误是否为"模型不支持 response_format"。
+ * Gateway 透传的错误可能带 status 或 message 关键字。
+ */
+function isUnsupportedError(err: unknown): boolean {
+	if (!err || typeof err !== 'object') return false;
+	const e = err as Record<string, unknown>;
+	if (e.status === 400) return true;
+	const msg = String(e.message ?? '').toLowerCase();
+	return msg.includes('response_format') || msg.includes('json_object');
 }
