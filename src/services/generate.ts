@@ -24,23 +24,22 @@ export interface GenerationPlan {
 
 export const PLAN_SYSTEM_PROMPT = `你是一款学习应用的出题规划专家。请分析用户提供的学习材料，制定出题计划。
 
-用户提供的学习材料本身就是一份题库。你的任务是：
-1. 分析材料，判断其中大约包含多少道题目。
-2. 将 totalCount 设为与材料中题目数量一致。
-3. 根据材料中题目的实际题型，从可选项中选取 2~4 种题型。
-
-注意：题目会分批生成，你只需给出总数，不必担心单次输出限制。
+首先判断材料性质：
+A）材料本身包含题目（有题号、选项、填空、问答等题目特征）→ 统计其中已有的题目数量。
+B）材料是知识性文本（课文、笔记、讲义等，没有现成题目）→ 根据材料的内容量和知识点密度，自行判断适合生成多少道题目。
 
 输出要求（必须严格遵守）：
 1. 只输出一个 JSON 对象，不要输出任何解释、前言或 markdown 代码块标记。
 2. 结构为 { "totalCount": 数字, "types": ["题型1", "题型2", ...] }。
-3. totalCount：必须与材料中实际包含的题目数量一致，不要多也不要少。
-4. types：从材料中题目的实际类型出发选取，可选项：
-   "single_answer"（单选）、"multiple_answer"（多选）、"true_false"（判断）、
+3. totalCount：
+   - 情况 A（材料含题目）：与材料中实际题目数量一致，不要多也不要少。
+   - 情况 B（材料为知识文本）：根据内容量和知识点密度自行判断，确保覆盖主要知识点。
+4. types：从材料中题目的实际类型选取（情况 A），或根据材料特点选择最合适的 2~4 种题型（情况 B）。
+   可选项："single_answer"（单选）、"multiple_answer"（多选）、"true_false"（判断）、
    "fill_blank"（填空）、"short_answer"（简答）。`;
 
 export function buildPlanUserPrompt(materialText: string): string {
-	return `请分析以下学习材料（题库），判断其中包含多少道题目，并制定出题计划：
+	return `请分析以下学习材料，判断其性质并制定出题计划：
 
 ${materialText}`;
 }
