@@ -1,4 +1,4 @@
-import { COST_GENERATE, COST_OCR, COST_PLAN, GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
+import { GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
 import { uploadQuestions } from './services/api-client';
 import { scanCorpus } from './services/content-scan';
 import { readFromR2, TaskError } from './services/extract';
@@ -32,11 +32,9 @@ export async function runPlanningPhase(
 	let corpus = material.texts.join('\n\n');
 	if (material.images.length > 0) {
 		const ocrText = await ocrImages({
-			accountId: env.CF_ACCOUNT_ID,
-			aigToken: env.CF_AIG_TOKEN,
+			ai: env.AI,
 			gatewayId: env.AI_GATEWAY_ID,
 			model: env.AI_OCR_MODEL,
-			customCost: COST_OCR,
 			images: material.images,
 		});
 		corpus = [corpus, ocrText].filter(Boolean).join('\n\n');
@@ -55,11 +53,9 @@ export async function runPlanningPhase(
 
 	// 调模型规划：分析材料，决定题目总数和题型分布
 	const planRaw = await chatCompletion({
-		accountId: env.CF_ACCOUNT_ID,
-		aigToken: env.CF_AIG_TOKEN,
+		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
 		model: env.AI_PLAN_MODEL,
-		customCost: COST_PLAN,
 		messages: [
 			{ role: 'system', content: PLAN_SYSTEM_PROMPT },
 			{ role: 'user', content: buildPlanUserPrompt(corpus) },
@@ -96,11 +92,9 @@ export async function runBatchGenerationPhase(
 	allStems: string[],
 ): Promise<{ questions: GeneratedQuestion[]; stems: string[] }> {
 	const batchRaw = await chatCompletion({
-		accountId: env.CF_ACCOUNT_ID,
-		aigToken: env.CF_AIG_TOKEN,
+		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
 		model: env.AI_GENERATE_MODEL,
-		customCost: COST_GENERATE,
 		messages: [
 			{ role: 'system', content: GENERATE_SYSTEM_PROMPT },
 			{

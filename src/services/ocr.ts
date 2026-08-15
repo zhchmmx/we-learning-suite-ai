@@ -1,6 +1,6 @@
 import { OCR_IMAGES_PER_CALL } from '../config';
 import type { ChatMessage } from '../types';
-import { chatCompletion, type CustomCost } from './llm';
+import { chatCompletion } from './llm';
 
 /**
  * 图片 OCR：调用视觉模型把图片转成文本。
@@ -18,14 +18,12 @@ const OCR_PROMPT =
  * 图片按 OCR_IMAGES_PER_CALL 分批，每批一次模型调用；批与批之间串行。
  */
 export async function ocrImages(opts: {
-	accountId: string;
-	aigToken: string;
+	ai: Ai;
 	gatewayId: string;
 	model: string;
-	customCost: CustomCost;
 	images: Array<{ base64: string; mimeType: string }>;
 }): Promise<string> {
-	const { accountId, aigToken, gatewayId, model, customCost, images } = opts;
+	const { ai, gatewayId, model, images } = opts;
 	const parts: string[] = [];
 
 	for (let i = 0; i < images.length; i += OCR_IMAGES_PER_CALL) {
@@ -40,11 +38,9 @@ export async function ocrImages(opts: {
 		];
 
 		const text = await chatCompletion({
-			accountId,
-			aigToken,
+			ai,
 			gatewayId,
 			model,
-			customCost,
 			messages: [{ role: 'user', content }],
 			// 图片里没有文字时模型返回空内容是正常结果
 			allowEmpty: true,

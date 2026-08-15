@@ -17,17 +17,15 @@ export type AppEnv = {
 		API_WORKER: Fetcher;
 		/** R2 对象存储绑定（与 we-learning-suite-api 共享同一个 bucket） */
 		R2_BUCKET: R2Bucket;
-		/** Cloudflare 账户 ID（拼 Gateway HTTP 端点 URL） */
-		CF_ACCOUNT_ID: string;
-		/** Cloudflare API Token（AI Gateway 认证，wrangler secret） */
-		CF_AIG_TOKEN: string;
+		/** Workers AI 绑定（通过 AI Gateway 路由） */
+		AI: Ai;
 		/** AI Gateway 路由名 —— 生成阶段 */
 		AI_GENERATE_MODEL: string;
 		/** AI Gateway 路由名 —— OCR 阶段 */
 		AI_OCR_MODEL: string;
 		/** AI Gateway 路由名 —— 规划阶段 */
 		AI_PLAN_MODEL: string;
-		/** AI Gateway ID（Gateway HTTP 端点 URL 中的 gateway_id） */
+		/** AI Gateway ID */
 		AI_GATEWAY_ID: string;
 		QUIZ_QUEUE: Queue;
 		/** OCR 异步处理 Durable Object */
