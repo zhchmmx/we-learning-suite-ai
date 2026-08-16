@@ -2,13 +2,14 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage } from '../types';
 
 /**
- * Workers AI 流式调用（通过 AI Gateway 路由）。
- * env.AI.run() + stream:true 返回 ReadableStream，SSE 格式。
- * 逐 chunk 拼接输出，空闲超时策略与原实现一致。
+ * Workers AI 流式调用（通过 AI Gateway compat 端点 / Unified API）。
+ * custom-{slug}/{model} 自定义提供商模型与 dynamic/<route> 路由名只在 compat 端点可用——
+ * ai.run(model, input, { gateway }) 仅认 @cf/* 与统一计费的第三方模型，传自定义名会在
+ * 绑定层报错（Ai._parseError）。流式返回 SSE，逐 chunk 拼接输出，空闲超时策略不变。
  *
  * SSE chunk 兼容两种格式：
  * - Workers AI 原生：delta.response
- * - OpenAI 兼容（自定义提供商通过 Gateway）：choices[0].delta.content
+ * - OpenAI 兼容（compat 端点 / 自定义提供商）：choices[0].delta.content
  */
 
 /** OpenAI 兼容格式的流式 delta */
@@ -46,22 +47,22 @@ export async function chatCompletion(opts: {
 	const { ai, gatewayId, models, messages, jsonOutput, allowEmpty, maxTokens } = opts;
 
 	let lastErr: unknown;
-	for (let i = 0; i < models.length; i++) {
-		const model = models[i];
+	const failures: string[] = [];
+	for (const model of models) {
 		try {
 			const text = await callModel(model);
 			console.log(`chatCompletion ok (model=${model}, chars=${text.length})`);
 			return text;
 		} catch (err) {
 			lastErr = err;
-			if (i < models.length - 1) {
-				console.warn(`Model ${model} failed, falling back to ${models[i + 1]}:`, err);
-			} else {
-				console.error(`All ${models.length} models in chain failed (last=${model}):`, err);
-			}
+			failures.push(`${model}: ${err instanceof Error ? err.message : String(err)}`);
+			console.warn(`Model ${model} failed:`, err);
 		}
 	}
-	throw lastErr;
+	// 聚合每个模型的失败原因，避免只抛最后一个错误丢掉前面的信息
+	throw new Error(`All ${models.length} models in chain failed — ${failures.join(' | ')}`, {
+		cause: lastErr,
+	});
 
 	/** 单模型调用：含 response_format 不兼容时去参重试一次 */
 	async function callModel(model: string): Promise<string> {
@@ -89,11 +90,10 @@ export async function chatCompletion(opts: {
 			input.max_tokens = maxTokens;
 		}
 
-		const stream = await ai.run(
+		const stream = await compatRun(ai, gatewayId, {
 			model,
-			input,
-			{ gateway: { id: gatewayId } },
-		) as unknown as ReadableStream;
+			...input,
+		}) as unknown as ReadableStream;
 
 		const reader = stream.getReader();
 		const decoder = new TextDecoder();
@@ -169,6 +169,30 @@ async function readWithIdleTimeout(
 	} finally {
 		if (timeoutId !== undefined) clearTimeout(timeoutId);
 	}
+}
+
+/**
+ * 通过 AI Gateway compat 端点（Unified API）发起 chat/completions 调用。
+ * 生成的 Ai 类型未声明 gateway().run() 的 compat 形态，用最小本地接口断言。
+ */
+function compatRun(ai: Ai, gatewayId: string, query: Record<string, unknown>): Promise<unknown> {
+	const gateway = (ai as unknown as {
+		gateway: (id: string) => {
+			run: (opts: {
+				provider: 'compat';
+				endpoint: string;
+				headers: Record<string, string>;
+				query: Record<string, unknown>;
+			}) => Promise<unknown>;
+		};
+	}).gateway(gatewayId);
+
+	return gateway.run({
+		provider: 'compat',
+		endpoint: 'chat/completions',
+		headers: {},
+		query,
+	});
 }
 
 /**
