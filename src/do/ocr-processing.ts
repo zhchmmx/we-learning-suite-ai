@@ -131,6 +131,7 @@ export class OCRProcessingDO implements DurableObject {
 			const text = await ocrImages({
 				ai: this.env.AI,
 				gatewayId: this.env.AI_GATEWAY_ID,
+				authToken: this.env.CF_AIG_TOKEN,
 				models: ocrModels(this.env),
 				images: batchImages,
 			});

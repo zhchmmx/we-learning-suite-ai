@@ -35,6 +35,7 @@ export async function runPlanningPhase(
 		const ocrText = await ocrImages({
 			ai: env.AI,
 			gatewayId: env.AI_GATEWAY_ID,
+			authToken: env.CF_AIG_TOKEN,
 			models: ocrModels(env),
 			images: material.images,
 		});
@@ -56,6 +57,7 @@ export async function runPlanningPhase(
 	const planRaw = await chatCompletion({
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
+		authToken: env.CF_AIG_TOKEN,
 		models: planModels(env),
 		messages: [
 			{ role: 'system', content: PLAN_SYSTEM_PROMPT },
@@ -95,6 +97,7 @@ export async function runBatchGenerationPhase(
 	const batchRaw = await chatCompletion({
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
+		authToken: env.CF_AIG_TOKEN,
 		models: generateModels(env),
 		messages: [
 			{ role: 'system', content: GENERATE_SYSTEM_PROMPT },

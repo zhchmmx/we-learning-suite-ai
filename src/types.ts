@@ -62,14 +62,21 @@ export interface ChatMessage {
 	content: string | ContentPart[];
 }
 
-/** 直连模式的单个模型目标：provider 段进请求 URL，model（裸名）进请求体 */
+/** 单个调用目标：provider 段进请求 URL，model（裸名）进请求体；dynamic 路由同构（provider='dynamic'） */
 export interface ModelTarget {
 	provider: string;
 	model: string;
 }
 
-/** 统一调用目标：直连模型，或保留的 AI Gateway dynamic 路由 */
-export type ChatTarget = ModelTarget | { route: string };
+/** 统一调用目标（直连与路由同构） */
+export type ChatTarget = ModelTarget;
+
+/** wrangler secret：AI Gateway 鉴权 token（cf-aig-authorization 头使用；用 wrangler secret put CF_AIG_TOKEN 设置） */
+declare global {
+	interface Env {
+		CF_AIG_TOKEN: string;
+	}
+}
 
 /** 下载并分诊后的材料 */
 export interface ExtractedMaterial {

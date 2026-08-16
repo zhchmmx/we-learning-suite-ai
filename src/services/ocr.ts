@@ -20,10 +20,11 @@ const OCR_PROMPT =
 export async function ocrImages(opts: {
 	ai: Ai;
 	gatewayId: string;
+	authToken: string;
 	models: ChatTarget[];
 	images: Array<{ base64: string; mimeType: string }>;
 }): Promise<string> {
-	const { ai, gatewayId, models, images } = opts;
+	const { ai, gatewayId, authToken, models, images } = opts;
 	const parts: string[] = [];
 
 	for (let i = 0; i < images.length; i += OCR_IMAGES_PER_CALL) {
@@ -40,6 +41,7 @@ export async function ocrImages(opts: {
 		const text = await chatCompletion({
 			ai,
 			gatewayId,
+			authToken,
 			models,
 			messages: [{ role: 'user', content }],
 			// 图片里没有文字时模型返回空内容是正常结果

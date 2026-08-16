@@ -2,15 +2,14 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage, ChatTarget } from '../types';
 
 /**
- * 模型流式调用（经 AI Gateway），两种路径共用同一套 SSE 解析：
- * - 直连模式：gateway.getUrl() 取网关基础 URL，fetch 调 Unified API
- *   （/compat/chat/completions），model 字段带 provider 前缀
- *   （custom-{slug}/{model} 或原生 {provider}/{model}），BYOK 鉴权由网关注入。
- * - 路由模式（保留）：ai.run(dynamic/<route>, input, { gateway })。
+ * 模型流式调用（经 AI Gateway provider 透传端点，fetch 直连）：
+ * gateway.getUrl() 取网关基础 URL，拼 /{provider}/v1/chat/completions，
+ * body 放裸模型名；cf-aig-authorization 头做网关鉴权，上游 BYOK key 由网关注入。
+ * dynamic 路由同构：provider='dynamic'、model 为裸路由名（如 plan_auto）。
  *
  * SSE chunk 兼容两种格式：
  * - Workers AI 原生：delta.response
- * - OpenAI 兼容（compat / 自定义提供商）：choices[0].delta.content
+ * - OpenAI 兼容（自定义提供商）：choices[0].delta.content
  */
 
 /** OpenAI 兼容格式的流式 delta */
@@ -39,13 +38,14 @@ interface NativeStreamDelta {
 export async function chatCompletion(opts: {
 	ai: Ai;
 	gatewayId: string;
+	authToken: string;
 	models: ChatTarget[];
 	messages: ChatMessage[];
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	maxTokens?: number;
 }): Promise<string> {
-	const { ai, gatewayId, models, messages, jsonOutput, allowEmpty, maxTokens } = opts;
+	const { ai, gatewayId, authToken, models, messages, jsonOutput, allowEmpty, maxTokens } = opts;
 
 	let lastErr: unknown;
 	const failures: string[] = [];
@@ -58,7 +58,7 @@ export async function chatCompletion(opts: {
 		} catch (err) {
 			lastErr = err;
 			failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-			console.warn(`Model ${name} failed:`, err);
+			console.warn(`Model ${name} failed: ${describeError(err)}`);
 		}
 	}
 	// 聚合每个模型的失败原因，避免只抛最后一个错误丢掉前面的信息
@@ -145,10 +145,10 @@ export async function chatCompletion(opts: {
 		return accumulated;
 	}
 
-	/** 打开模型输出流：路由目标走 ai.run()；直连目标走 Unified API（compat 端点）+ fetch */
+	/** 打开模型输出流：统一走 provider 透传端点（dynamic 路由同构，provider='dynamic'） */
 	async function openStream(target: ChatTarget, input: Record<string, unknown>): Promise<ReadableStream> {
-		if ('route' in target) {
-			return ai.run(target.route, input, { gateway: { id: gatewayId } }) as unknown as ReadableStream;
+		if (!authToken) {
+			throw new Error('CF_AIG_TOKEN is not set — run: npx wrangler secret put CF_AIG_TOKEN');
 		}
 		let base: string;
 		try {
@@ -156,14 +156,16 @@ export async function chatCompletion(opts: {
 		} catch (err) {
 			throw Object.assign(new Error(`gateway getUrl() failed: ${describeError(err)}`), { cause: err });
 		}
-		const url = `${base}/compat/chat/completions`;
-		const model = `${target.provider}/${target.model}`;
+		const url = `${base}/${target.provider}/v1/chat/completions`;
 		let response: Response;
 		try {
 			response = await fetch(url, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ model, ...input }),
+				headers: {
+					'Content-Type': 'application/json',
+					'cf-aig-authorization': `Bearer ${authToken}`,
+				},
+				body: JSON.stringify({ model: target.model, ...input }),
 			});
 		} catch (err) {
 			throw Object.assign(
@@ -182,9 +184,9 @@ export async function chatCompletion(opts: {
 	}
 }
 
-/** 调用目标的日志显示名：直连为 provider/model，路由为 route 名 */
+/** 调用目标的日志显示名（路由模式显示为 dynamic/<路由名>） */
 function targetName(target: ChatTarget): string {
-	return 'route' in target ? target.route : `${target.provider}/${target.model}`;
+	return `${target.provider}/${target.model}`;
 }
 
 /** 网关基础 URL 缓存（isolate 存续期内复用；失败时移除以便下次重取） */
