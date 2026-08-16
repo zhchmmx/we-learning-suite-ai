@@ -2,14 +2,14 @@ import { CHUNK_IDLE_TIMEOUT_MS } from '../config';
 import type { ChatMessage } from '../types';
 
 /**
- * Workers AI 流式调用（通过 AI Gateway compat 端点 / Unified API）。
- * custom-{slug}/{model} 自定义提供商模型与 dynamic/<route> 路由名只在 compat 端点可用——
- * ai.run(model, input, { gateway }) 仅认 @cf/* 与统一计费的第三方模型，传自定义名会在
- * 绑定层报错（Ai._parseError）。流式返回 SSE，逐 chunk 拼接输出，空闲超时策略不变。
+ * Workers AI 流式调用（经 AI Gateway）。
+ * env.AI.run() + stream:true 返回 ReadableStream，SSE 格式。
+ * 逐 chunk 拼接输出，空闲超时策略与原实现一致。
+ * 模型名可为 custom-{slug}/{model}、dynamic/<route> 或 @cf/* 目录模型。
  *
  * SSE chunk 兼容两种格式：
  * - Workers AI 原生：delta.response
- * - OpenAI 兼容（compat 端点 / 自定义提供商）：choices[0].delta.content
+ * - OpenAI 兼容（自定义提供商通过 Gateway）：choices[0].delta.content
  */
 
 /** OpenAI 兼容格式的流式 delta */
@@ -90,10 +90,11 @@ export async function chatCompletion(opts: {
 			input.max_tokens = maxTokens;
 		}
 
-		const stream = await compatRun(ai, gatewayId, {
+		const stream = await ai.run(
 			model,
-			...input,
-		}) as unknown as ReadableStream;
+			input,
+			{ gateway: { id: gatewayId } },
+		) as unknown as ReadableStream;
 
 		const reader = stream.getReader();
 		const decoder = new TextDecoder();
@@ -169,30 +170,6 @@ async function readWithIdleTimeout(
 	} finally {
 		if (timeoutId !== undefined) clearTimeout(timeoutId);
 	}
-}
-
-/**
- * 通过 AI Gateway compat 端点（Unified API）发起 chat/completions 调用。
- * 生成的 Ai 类型未声明 gateway().run() 的 compat 形态，用最小本地接口断言。
- */
-function compatRun(ai: Ai, gatewayId: string, query: Record<string, unknown>): Promise<unknown> {
-	const gateway = (ai as unknown as {
-		gateway: (id: string) => {
-			run: (opts: {
-				provider: 'compat';
-				endpoint: string;
-				headers: Record<string, string>;
-				query: Record<string, unknown>;
-			}) => Promise<unknown>;
-		};
-	}).gateway(gatewayId);
-
-	return gateway.run({
-		provider: 'compat',
-		endpoint: 'chat/completions',
-		headers: {},
-		query,
-	});
 }
 
 /**
