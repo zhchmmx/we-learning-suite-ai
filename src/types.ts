@@ -27,6 +27,10 @@ export type AppEnv = {
 		AI_PLAN_MODEL: string;
 		/** AI Gateway ID */
 		AI_GATEWAY_ID: string;
+		/** Cloudflare 账号 ID（AI Gateway Logs API 路径用） */
+		CF_ACCOUNT_ID: string;
+		/** wrangler secret：AI Gateway 访问令牌（模型调用鉴权；已实测可查 Logs API） */
+		CF_AIG_TOKEN: string;
 		QUIZ_QUEUE: Queue;
 		/** OCR 异步处理 Durable Object */
 		OCR_DO: DurableObjectNamespace;

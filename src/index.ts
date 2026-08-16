@@ -6,6 +6,7 @@ import {
 	MAX_MATERIALS,
 } from './config';
 import { ApiClientError, patchSessionStatus } from './services/api-client';
+import { currentBeijingMonth, fetchMonthlyUsage, isValidYm } from './services/usage';
 import type { AppEnv, GenerateMessage, MaterialItem } from './types';
 
 // wrangler 要求 Durable Object 类从入口模块导出(durable_objects.class_name 解析到这里)
@@ -208,6 +209,42 @@ app.get('/api/ocr/status/:taskId', async (c) => {
 			progress: { batch: state.batchIndex ?? 0, total: state.totalBatches ?? 0 },
 		},
 	});
+});
+
+/**
+ * GET /api/usage?userId=<透传的认证userId>&ym=YYYY-MM（可选）
+ * 用户月度 AI 用量（由 we-learning-suite-api 服务端调用）。
+ * 聚合 AI Gateway 日志中该用户当月（北京时间自然月）的 cost / 请求数 / token 数。
+ */
+app.get('/api/usage', async (c) => {
+	const userId = c.req.query('userId');
+	if (!userId) {
+		return c.json({ error: '"userId" is required' }, 400);
+	}
+
+	let ym = c.req.query('ym');
+	if (!ym) {
+		ym = currentBeijingMonth();
+	} else if (!isValidYm(ym)) {
+		return c.json({ error: 'Invalid ym' }, 400);
+	}
+
+	try {
+		const usage = await fetchMonthlyUsage({
+			authToken: c.env.CF_AIG_TOKEN,
+			accountId: c.env.CF_ACCOUNT_ID,
+			gatewayId: c.env.AI_GATEWAY_ID,
+			userId,
+			ym,
+		});
+		return c.json({ data: usage });
+	} catch (err) {
+		console.error(
+			`Usage query failed (user=${userId}, ym=${ym}):`,
+			err instanceof Error ? err.message : err,
+		);
+		return c.json({ error: '用量服务暂时不可用' }, 502);
+	}
 });
 
 export default {

@@ -41,6 +41,8 @@
 		"AI_PLAN_MODEL": "dynamic/plan_auto",
 		// AI Gateway ID（env.AI.run() 的 gateway.id 参数）
 		"AI_GATEWAY_ID": "we-learning-suite-ai-gateway",
+		// Cloudflare 账号 ID（AI Gateway Logs API 路径用；wrangler whoami 查得）
+		"CF_ACCOUNT_ID": "28d750ec737e82aa6204afa76b9b9295",
 		// ── Waffo scan-prompt 内容审核 ──
 		// 商户 ID（非敏感，普通环境变量即可）
 		"WAFFO_MERCHANT_ID": "MER_366aA3JhhsRSJ7ffU8E2Wr",
