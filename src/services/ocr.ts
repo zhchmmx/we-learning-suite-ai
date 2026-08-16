@@ -1,5 +1,5 @@
 import { OCR_IMAGES_PER_CALL } from '../config';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, ChatTarget } from '../types';
 import { chatCompletion } from './llm';
 
 /**
@@ -20,7 +20,7 @@ const OCR_PROMPT =
 export async function ocrImages(opts: {
 	ai: Ai;
 	gatewayId: string;
-	models: string[];
+	models: ChatTarget[];
 	images: Array<{ base64: string; mimeType: string }>;
 }): Promise<string> {
 	const { ai, gatewayId, models, images } = opts;

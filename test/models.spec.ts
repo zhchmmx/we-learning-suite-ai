@@ -13,8 +13,8 @@ describe("model chain resolution", () => {
 	});
 
 	it("route mode falls back to dynamic route names", () => {
-		expect(planModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([env.AI_PLAN_MODEL]);
-		expect(generateModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([env.AI_GENERATE_MODEL]);
-		expect(ocrModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([env.AI_OCR_MODEL]);
+		expect(planModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([{ route: env.AI_PLAN_MODEL }]);
+		expect(generateModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([{ route: env.AI_GENERATE_MODEL }]);
+		expect(ocrModels({ ...env, USE_DIRECT_MODELS: "false" })).toEqual([{ route: env.AI_OCR_MODEL }]);
 	});
 });

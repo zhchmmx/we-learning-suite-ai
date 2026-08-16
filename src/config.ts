@@ -1,3 +1,5 @@
+import type { ModelTarget } from './types';
+
 /** 图片通道限制 */
 export const MAX_IMAGES = 15;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 单张 4MB（base64 编码是 CPU 操作，免费套餐要控制量）
@@ -31,26 +33,27 @@ export const CHUNK_IDLE_TIMEOUT_MS = 30_000;
 /**
  * 直连模型链（USE_DIRECT_MODELS="true" 时生效）：主选不可用依次降级。
  * 不加退避等待、不对同一模型重试——网关侧已配置指数退避。
+ * provider 段进请求 URL（gateway.getUrl(provider)），model 为裸名进请求体；
  * plan 与 generate 分开定义，便于以后独立调整。
  */
-export const PLAN_MODEL_CHAIN = [
-	'custom-dlut/Qwen3.5-122B-A10B',
-	'custom-mimo/mimo-v2.5-pro',
-	'deepseek-v4-flash',
-] as const;
+export const PLAN_MODEL_CHAIN: readonly ModelTarget[] = [
+	{ provider: 'custom-dlut', model: 'Qwen3.5-122B-A10B' },
+	{ provider: 'custom-mimo', model: 'mimo-v2.5-pro' },
+	{ provider: 'deepseek', model: 'deepseek-v4-flash' },
+];
 
 /** generate 模型链（当前与 plan 相同，可独立修改） */
-export const GENERATE_MODEL_CHAIN = [
-	'custom-dlut/Qwen3.5-122B-A10B',
-	'custom-mimo/mimo-v2.5-pro',
-	'deepseek-v4-flash',
-] as const;
+export const GENERATE_MODEL_CHAIN: readonly ModelTarget[] = [
+	{ provider: 'custom-dlut', model: 'Qwen3.5-122B-A10B' },
+	{ provider: 'custom-mimo', model: 'mimo-v2.5-pro' },
+	{ provider: 'deepseek', model: 'deepseek-v4-flash' },
+];
 
 /** OCR 模型链 */
-export const OCR_MODEL_CHAIN = [
-	'custom-dlut/PaddleOCR-VL-1.5',
-	'custom-mimo/mimo-v2.5',
-] as const;
+export const OCR_MODEL_CHAIN: readonly ModelTarget[] = [
+	{ provider: 'custom-dlut', model: 'PaddleOCR-VL-1.5' },
+	{ provider: 'custom-mimo', model: 'mimo-v2.5' },
+];
 export const API_CALLBACK_TIMEOUT_MS = 15_000;
 
 /** 受理端点校验 body 时材料的数量上限 */
