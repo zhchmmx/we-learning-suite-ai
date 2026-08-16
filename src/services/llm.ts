@@ -3,14 +3,14 @@ import type { ChatMessage, ChatTarget } from '../types';
 
 /**
  * 模型流式调用（经 AI Gateway），两种路径共用同一套 SSE 解析：
- * - 直连模式：gateway.getUrl(provider) 取 provider 专属代理 URL，
- *   fetch 调 /chat/completions，body 放裸模型名——provider 已在 URL，
- *   BYOK 鉴权由网关注入。
+ * - 直连模式：gateway.getUrl() 取网关基础 URL，fetch 调 Unified API
+ *   （/compat/chat/completions），model 字段带 provider 前缀
+ *   （custom-{slug}/{model} 或原生 {provider}/{model}），BYOK 鉴权由网关注入。
  * - 路由模式（保留）：ai.run(dynamic/<route>, input, { gateway })。
  *
  * SSE chunk 兼容两种格式：
  * - Workers AI 原生：delta.response
- * - OpenAI 兼容（自定义提供商）：choices[0].delta.content
+ * - OpenAI 兼容（compat / 自定义提供商）：choices[0].delta.content
  */
 
 /** OpenAI 兼容格式的流式 delta */
@@ -145,17 +145,32 @@ export async function chatCompletion(opts: {
 		return accumulated;
 	}
 
-	/** 打开模型输出流：路由目标走 ai.run()；直连目标走 provider 代理 URL + fetch */
+	/** 打开模型输出流：路由目标走 ai.run()；直连目标走 Unified API（compat 端点）+ fetch */
 	async function openStream(target: ChatTarget, input: Record<string, unknown>): Promise<ReadableStream> {
 		if ('route' in target) {
 			return ai.run(target.route, input, { gateway: { id: gatewayId } }) as unknown as ReadableStream;
 		}
-		const url = await providerUrl(ai, gatewayId, target.provider);
-		const response = await fetch(`${url}/chat/completions`, {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ model: target.model, ...input }),
-		});
+		let base: string;
+		try {
+			base = await gatewayBaseUrl(ai, gatewayId);
+		} catch (err) {
+			throw Object.assign(new Error(`gateway getUrl() failed: ${describeError(err)}`), { cause: err });
+		}
+		const url = `${base}/compat/chat/completions`;
+		const model = `${target.provider}/${target.model}`;
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ model, ...input }),
+			});
+		} catch (err) {
+			throw Object.assign(
+				new Error(`fetch ${url} failed: ${describeError(err)}`),
+				{ status: (err as { status?: number })?.status, cause: err },
+			);
+		}
 		if (!response.ok) {
 			const detail = await response.text().catch(() => '');
 			throw Object.assign(
@@ -172,19 +187,33 @@ function targetName(target: ChatTarget): string {
 	return 'route' in target ? target.route : `${target.provider}/${target.model}`;
 }
 
-/** provider 代理 URL 缓存（isolate 存续期内复用；失败时移除以便下次重取） */
-const providerUrlCache = new Map<string, Promise<string>>();
+/** 网关基础 URL 缓存（isolate 存续期内复用；失败时移除以便下次重取） */
+const gatewayBaseCache = new Map<string, Promise<string>>();
 
-function providerUrl(ai: Ai, gatewayId: string, provider: string): Promise<string> {
-	const key = `${gatewayId}/${provider}`;
-	const cached = providerUrlCache.get(key);
+function gatewayBaseUrl(ai: Ai, gatewayId: string): Promise<string> {
+	const cached = gatewayBaseCache.get(gatewayId);
 	if (cached) return cached;
-	const pending = ai.gateway(gatewayId).getUrl(provider).catch((err: unknown) => {
-		providerUrlCache.delete(key);
-		throw err;
-	});
-	providerUrlCache.set(key, pending);
+	// getUrl() 无参形式：返回 https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/
+	const pending = ai
+		.gateway(gatewayId)
+		.getUrl()
+		.then(
+			(url) => url.replace(/\/+$/, ''),
+			(err: unknown) => {
+				gatewayBaseCache.delete(gatewayId);
+				throw err;
+			},
+		);
+	gatewayBaseCache.set(gatewayId, pending);
 	return pending;
+}
+
+/** 错误描述：绑定层错误可能没有 message，回退到 name / 字符串形式并带上 status */
+function describeError(err: unknown): string {
+	if (!err || typeof err !== 'object') return String(err);
+	const e = err as { name?: string; message?: string; status?: number };
+	const text = e.message || e.name || 'unknown error';
+	return e.status !== undefined ? `${text} (status ${e.status})` : text;
 }
 
 /**
