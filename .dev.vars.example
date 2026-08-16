@@ -9,7 +9,7 @@ AI_PROVIDERS=[{"name":"main","priority":1,"baseUrl":"https://your-provider.examp
 # 每家提供商一个 key：AI_PROVIDER_KEY_<NAME 大写，非字母数字转下划线>
 AI_PROVIDER_KEY_MAIN=sk-your-key-here
 
-# AI Gateway 鉴权 token（cf-aig-authorization 头；生产用 wrangler secret put CF_AIG_TOKEN）
+# AI Gateway 鉴权 token（Authorization 头；生产用 wrangler secret put CF_AIG_TOKEN）
 CF_AIG_TOKEN=your-gateway-token-here
 
 # ── Waffo scan-prompt 内容审核（本地联调；生产私钥用 wrangler secret put --remote）──

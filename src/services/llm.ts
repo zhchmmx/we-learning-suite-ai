@@ -4,7 +4,7 @@ import type { ChatMessage, ChatTarget } from '../types';
 /**
  * 模型流式调用（经 AI Gateway provider 透传端点，fetch 直连）：
  * gateway.getUrl() 取网关基础 URL，拼 /{provider}/v1/chat/completions，
- * body 放裸模型名；cf-aig-authorization 头做网关鉴权，上游 BYOK key 由网关注入。
+ * body 放裸模型名；Authorization 头做网关鉴权，上游 BYOK key 由网关注入。
  * dynamic 路由同构：provider='dynamic'、model 为裸路由名（如 plan_auto）。
  *
  * SSE chunk 兼容两种格式：
@@ -163,7 +163,7 @@ export async function chatCompletion(opts: {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					'cf-aig-authorization': `Bearer ${authToken}`,
+					'Authorization': `Bearer ${authToken}`,
 				},
 				body: JSON.stringify({ model: target.model, ...input }),
 			});

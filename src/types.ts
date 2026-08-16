@@ -71,7 +71,7 @@ export interface ModelTarget {
 /** 统一调用目标（直连与路由同构） */
 export type ChatTarget = ModelTarget;
 
-/** wrangler secret：AI Gateway 鉴权 token（cf-aig-authorization 头使用；用 wrangler secret put CF_AIG_TOKEN 设置） */
+/** wrangler secret：AI Gateway 鉴权 token（Authorization 头使用；用 wrangler secret put CF_AIG_TOKEN 设置） */
 declare global {
 	interface Env {
 		CF_AIG_TOKEN: string;
