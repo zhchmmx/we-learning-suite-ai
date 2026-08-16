@@ -23,8 +23,10 @@ export async function ocrImages(opts: {
 	authToken: string;
 	models: ChatTarget[];
 	images: Array<{ base64: string; mimeType: string }>;
+	/** 终端用户 ID，透传给模型调用进网关日志；独立 OCR 链路（匿名）不传 */
+	userId?: string;
 }): Promise<string> {
-	const { ai, gatewayId, authToken, models, images } = opts;
+	const { ai, gatewayId, authToken, models, images, userId } = opts;
 	const parts: string[] = [];
 
 	for (let i = 0; i < images.length; i += OCR_IMAGES_PER_CALL) {
@@ -42,6 +44,7 @@ export async function ocrImages(opts: {
 			ai,
 			gatewayId,
 			authToken,
+			userId,
 			models,
 			messages: [{ role: 'user', content }],
 			// 图片里没有文字时模型返回空内容是正常结果

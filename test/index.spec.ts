@@ -112,7 +112,17 @@ describe("POST /api/quiz/generate", () => {
 	it("rejects missing ticket with 400", async () => {
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
+			{ userId: "u-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
+			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
+		);
+		expect(response.status).toBe(400);
+		expect(send).not.toHaveBeenCalled();
+	});
+
+	it("rejects missing userId with 400", async () => {
+		const send = vi.fn();
+		const response = await postGenerate(
+			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
@@ -122,7 +132,7 @@ describe("POST /api/quiz/generate", () => {
 	it("rejects invalid materials with 400", async () => {
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", materials: [] },
+			{ ticket: "t-1", userId: "u-1", materials: [] },
 			makeEnv({ API_WORKER: rejectAllApiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(400);
@@ -139,7 +149,7 @@ describe("POST /api/quiz/generate", () => {
 
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
+			{ ticket: "t-1", userId: "u-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(401);
@@ -156,13 +166,14 @@ describe("POST /api/quiz/generate", () => {
 
 		const send = vi.fn();
 		const response = await postGenerate(
-			{ ticket: "t-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
+			{ ticket: "t-1", userId: "u-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] },
 			makeEnv({ API_WORKER: apiWorker, QUIZ_QUEUE: { send } }),
 		);
 		expect(response.status).toBe(202);
 		expect(send).toHaveBeenCalledTimes(1);
 		expect(send).toHaveBeenCalledWith({
 			ticket: "t-1",
+			userId: "u-1",
 			materials: [{ r2Key: "a.txt", mimeType: "text/plain" }],
 		});
 	});
@@ -270,7 +281,7 @@ describe("queue consumer", () => {
 
 	function makeBatch(ticket: string): MessageBatch<unknown> {
 		return {
-			messages: [{ body: { ticket, materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] } }],
+			messages: [{ body: { ticket, userId: "u-1", materials: [{ r2Key: "a.txt", mimeType: "text/plain" }] } }],
 		} as unknown as MessageBatch<unknown>;
 	}
 
@@ -284,6 +295,7 @@ describe("queue consumer", () => {
 		expect(init?.method).toBe("POST");
 		expect(JSON.parse(String(init?.body))).toEqual({
 			ticket: "t-q-1",
+			userId: "u-1",
 			materials: [{ r2Key: "a.txt", mimeType: "text/plain" }],
 		});
 	});
@@ -348,7 +360,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 			new Request("http://do/start", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ ticket, materials }),
+				body: JSON.stringify({ ticket, userId: "u-1", materials }),
 			}),
 		);
 		expect(res.status).toBe(202);

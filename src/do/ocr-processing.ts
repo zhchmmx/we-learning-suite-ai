@@ -15,6 +15,8 @@ import { ocrImages } from '../services/ocr';
 
 interface OCRTask {
 	taskId: string;
+	/** 发起用户 ID（API Worker 注入；匿名调用无此字段），模型调用时进 AI Gateway 请求标识 */
+	userId?: string;
 	phase: 'pending' | 'processing' | 'done' | 'failed';
 	batchIndex: number;
 	totalBatches: number;
@@ -48,8 +50,9 @@ export class OCRProcessingDO implements DurableObject {
 				return new Response('Task already in progress or completed', { status: 409 });
 			}
 
-			const { taskId, images } = (await request.json()) as {
+			const { taskId, userId, images } = (await request.json()) as {
 				taskId: string;
+				userId?: string;
 				images: Array<{ base64: string; mimeType: string }>;
 			};
 
@@ -69,6 +72,7 @@ export class OCRProcessingDO implements DurableObject {
 
 			const task: OCRTask = {
 				taskId,
+				userId,
 				phase: 'pending',
 				batchIndex: 0,
 				totalBatches: Math.ceil(images.length / OCR_IMAGES_PER_CALL),
@@ -134,6 +138,7 @@ export class OCRProcessingDO implements DurableObject {
 				authToken: this.env.CF_AIG_TOKEN,
 				models: ocrModels(this.env),
 				images: batchImages,
+				userId: task.userId,
 			});
 
 			if (text.trim()) {

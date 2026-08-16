@@ -24,6 +24,7 @@ import type { GeneratedQuestion, MaterialItem } from './types';
 export async function runPlanningPhase(
 	env: Env,
 	ticket: string,
+	userId: string,
 	materials: MaterialItem[],
 ): Promise<{ plan: GenerationPlan; corpus: string }> {
 	// 从 R2 直读材料 + 格式分诊
@@ -38,6 +39,7 @@ export async function runPlanningPhase(
 			authToken: env.CF_AIG_TOKEN,
 			models: ocrModels(env),
 			images: material.images,
+			userId,
 		});
 		corpus = [corpus, ocrText].filter(Boolean).join('\n\n');
 	}
@@ -58,6 +60,7 @@ export async function runPlanningPhase(
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
 		authToken: env.CF_AIG_TOKEN,
+		userId,
 		models: planModels(env),
 		messages: [
 			{ role: 'system', content: PLAN_SYSTEM_PROMPT },
@@ -87,6 +90,7 @@ export async function runPlanningPhase(
  */
 export async function runBatchGenerationPhase(
 	env: Env,
+	userId: string,
 	corpus: string,
 	plan: GenerationPlan,
 	batchIndex: number,
@@ -98,6 +102,7 @@ export async function runBatchGenerationPhase(
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
 		authToken: env.CF_AIG_TOKEN,
+		userId,
 		models: generateModels(env),
 		messages: [
 			{ role: 'system', content: GENERATE_SYSTEM_PROMPT },

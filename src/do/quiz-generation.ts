@@ -14,6 +14,8 @@ import type { GeneratedQuestion, MaterialItem } from '../types';
  */
 interface TaskState {
 	ticket: string;
+	/** 发起用户 ID（随任务持久化，供各阶段调用模型时标识） */
+	userId: string;
 	materials: MaterialItem[];
 	phase: 'pending' | 'planning' | 'generating' | 'uploading' | 'done' | 'failed';
 	plan: GenerationPlan | null;
@@ -50,13 +52,15 @@ export class QuizGenerationDO implements DurableObject {
 			return new Response('Task already in progress or completed', { status: 409 });
 		}
 
-		const { ticket, materials } = (await request.json()) as {
+		const { ticket, userId, materials } = (await request.json()) as {
 			ticket: string;
+			userId: string;
 			materials: MaterialItem[];
 		};
 
 		const task: TaskState = {
 			ticket,
+			userId,
 			materials,
 			phase: 'pending',
 			plan: null,
@@ -86,7 +90,7 @@ export class QuizGenerationDO implements DurableObject {
 				task.phase = 'planning';
 				await this.state.storage.put('task', task);
 
-				const { plan, corpus } = await runPlanningPhase(this.env, task.ticket, task.materials);
+				const { plan, corpus } = await runPlanningPhase(this.env, task.ticket, task.userId, task.materials);
 
 				// 规划阶段可能已耗时较长：续期 ticket，同时检测取消信号（4xx 抛出 → 中止）
 				await this.checkAndRenewTicket(task.ticket);
@@ -114,6 +118,7 @@ export class QuizGenerationDO implements DurableObject {
 
 				const { questions, stems } = await runBatchGenerationPhase(
 					this.env,
+					task.userId,
 					corpus,
 					task.plan,
 					task.batchIndex,

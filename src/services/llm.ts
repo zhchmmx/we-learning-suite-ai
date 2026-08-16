@@ -34,6 +34,7 @@ interface NativeStreamDelta {
  * @param jsonOutput 请求 JSON 输出模式。若模型不认识 response_format 参数
  *                   （抛错），自动去掉该参数重试一次再判断失败。
  * @param allowEmpty 允许空输出（OCR 场景：图片里没有文字时模型正常返回空内容，不算失败）
+ * @param userId     终端用户 ID，经 cf-aig-metadata 头进网关日志（匿名链路可不传）
  */
 export async function chatCompletion(opts: {
 	ai: Ai;
@@ -44,8 +45,9 @@ export async function chatCompletion(opts: {
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	maxTokens?: number;
+	userId?: string;
 }): Promise<string> {
-	const { ai, gatewayId, authToken, models, messages, jsonOutput, allowEmpty, maxTokens } = opts;
+	const { ai, gatewayId, authToken, models, messages, jsonOutput, allowEmpty, maxTokens, userId } = opts;
 
 	let lastErr: unknown;
 	const failures: string[] = [];
@@ -164,6 +166,8 @@ export async function chatCompletion(opts: {
 				headers: {
 					'Content-Type': 'application/json',
 					'Authorization': `Bearer ${authToken}`,
+					// 终端用户标识进网关日志/分析；cf. 前缀为 Cloudflare 保留，用 user_id
+					...(userId ? { 'cf-aig-metadata': JSON.stringify({ user_id: userId }) } : {}),
 				},
 				body: JSON.stringify({ model: target.model, ...input }),
 			});

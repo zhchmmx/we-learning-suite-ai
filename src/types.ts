@@ -37,6 +37,8 @@ export type AppEnv = {
 /** 队列消息体 */
 export interface GenerateMessage {
 	ticket: string;
+	/** 发起用户 ID（由 API Worker 触发时透传，用于 AI Gateway 请求标识） */
+	userId: string;
 	/** 待处理材料列表（由 API Worker 直接传 R2 key，不走预签名 URL） */
 	materials: MaterialItem[];
 	options?: {

@@ -34,7 +34,7 @@ app.get('/health', (c) =>
  * POST /api/quiz/generate
  * 受理出题任务（由 we-learning-suite-api 服务端调用，凭证 = ticket）
  *
- * Body: { ticket, materials: Array<{ r2Key: string, mimeType: string }> }
+ * Body: { ticket, userId, materials: Array<{ r2Key: string, mimeType: string }> }
  * 流程：PATCH status=processing 验票 → 消息入队 → 立刻返回 202
  */
 app.post('/api/quiz/generate', async (c) => {
@@ -48,6 +48,11 @@ app.post('/api/quiz/generate', async (c) => {
 	const ticket = body.ticket;
 	if (!ticket || typeof ticket !== 'string') {
 		return c.json({ error: '"ticket" is required' }, 400);
+	}
+
+	const userId = body.userId;
+	if (!userId || typeof userId !== 'string') {
+		return c.json({ error: '"userId" is required' }, 400);
 	}
 
 	const materials = body.materials;
@@ -74,6 +79,7 @@ app.post('/api/quiz/generate', async (c) => {
 
 	const message: GenerateMessage = {
 		ticket,
+		userId,
 		materials: materials as MaterialItem[],
 	};
 	await c.env.QUIZ_QUEUE.send(message);
@@ -95,11 +101,17 @@ app.post('/api/quiz/generate', async (c) => {
  * 保证服务端只存文本、出题管线只吃文本。
  */
 app.post('/api/ocr', async (c) => {
-	let body: { images?: Array<{ data?: unknown; mimeType?: unknown }> };
+	let body: { userId?: unknown; images?: Array<{ data?: unknown; mimeType?: unknown }> };
 	try {
 		body = await c.req.json();
 	} catch {
 		return c.json({ error: 'Invalid JSON body' }, 400);
+	}
+
+	// 发起用户（由 API Worker 注入；可选，匿名调用不传），随任务进 DO → AI Gateway 请求标识
+	const userId = body.userId;
+	if (userId !== undefined && typeof userId !== 'string') {
+		return c.json({ error: '"userId" must be a string' }, 400);
 	}
 
 	const images = body.images;
@@ -130,7 +142,7 @@ app.post('/api/ocr', async (c) => {
 		await stub.fetch('http://do/ocr', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ taskId, images: normalized }),
+			body: JSON.stringify({ taskId, userId, images: normalized }),
 		});
 	} catch (err) {
 		console.error('OCR DO dispatch failed:', err);
