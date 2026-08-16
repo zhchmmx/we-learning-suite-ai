@@ -1,4 +1,5 @@
 import { OCR_IMAGES_PER_CALL } from '../config';
+import { ocrModels } from '../services/models';
 import { ocrImages } from '../services/ocr';
 
 /**
@@ -130,7 +131,7 @@ export class OCRProcessingDO implements DurableObject {
 			const text = await ocrImages({
 				ai: this.env.AI,
 				gatewayId: this.env.AI_GATEWAY_ID,
-				model: this.env.AI_OCR_MODEL,
+				models: ocrModels(this.env),
 				images: batchImages,
 			});
 

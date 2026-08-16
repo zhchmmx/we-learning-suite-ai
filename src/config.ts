@@ -27,6 +27,30 @@ export const GENERATION_MAX_TOKENS = 16_000;
 
 /** 流式接收：最后一个 chunk 到达后，若超过此时间仍无新 chunk 则视为连接挂死，中止请求 */
 export const CHUNK_IDLE_TIMEOUT_MS = 30_000;
+
+/**
+ * 直连模型链（USE_DIRECT_MODELS="true" 时生效）：主选不可用依次降级。
+ * 不加退避等待、不对同一模型重试——网关侧已配置指数退避。
+ * plan 与 generate 分开定义，便于以后独立调整。
+ */
+export const PLAN_MODEL_CHAIN = [
+	'custom-dlut/Qwen3.5-122B-A10B',
+	'custom-mimo/mimo-v2.5-pro',
+	'deepseek-v4-flash',
+] as const;
+
+/** generate 模型链（当前与 plan 相同，可独立修改） */
+export const GENERATE_MODEL_CHAIN = [
+	'custom-dlut/Qwen3.5-122B-A10B',
+	'custom-mimo/mimo-v2.5-pro',
+	'deepseek-v4-flash',
+] as const;
+
+/** OCR 模型链 */
+export const OCR_MODEL_CHAIN = [
+	'custom-dlut/PaddleOCR-VL-1.5',
+	'custom-mimo/mimo-v2.5',
+] as const;
 export const API_CALLBACK_TIMEOUT_MS = 15_000;
 
 /** 受理端点校验 body 时材料的数量上限 */

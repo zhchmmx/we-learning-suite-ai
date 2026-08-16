@@ -27,7 +27,8 @@ interface NativeStreamDelta {
 
 /**
  * 调用一次 chat completions（流式），返回模型输出的完整文本。
- * 任何错误 / 空输出 / 超时都抛错（由 Gateway 负责 fallback）。
+ * 按传入的模型链依次尝试：任一模型失败（错误 / 空输出 / 超时）立即换下一个，
+ * 不加退避等待、不重试同一模型（网关侧已配置指数退避）；全链失败抛出最后一个错误。
  *
  * @param jsonOutput 请求 JSON 输出模式。若模型不认识 response_format 参数
  *                   （抛错），自动去掉该参数重试一次再判断失败。
@@ -36,29 +37,50 @@ interface NativeStreamDelta {
 export async function chatCompletion(opts: {
 	ai: Ai;
 	gatewayId: string;
-	model: string;
+	models: string[];
 	messages: ChatMessage[];
 	jsonOutput?: boolean;
 	allowEmpty?: boolean;
 	maxTokens?: number;
 }): Promise<string> {
-	const { ai, gatewayId, model, messages, jsonOutput, allowEmpty, maxTokens } = opts;
+	const { ai, gatewayId, models, messages, jsonOutput, allowEmpty, maxTokens } = opts;
 
-	if (jsonOutput) {
+	let lastErr: unknown;
+	for (let i = 0; i < models.length; i++) {
+		const model = models[i];
 		try {
-			return await doCall(true);
+			const text = await callModel(model);
+			console.log(`chatCompletion ok (model=${model}, chars=${text.length})`);
+			return text;
 		} catch (err) {
-			// 模型不支持 response_format：去掉参数重试一次
-			if (isUnsupportedError(err)) {
-				return doCall(false);
+			lastErr = err;
+			if (i < models.length - 1) {
+				console.warn(`Model ${model} failed, falling back to ${models[i + 1]}:`, err);
+			} else {
+				console.error(`All ${models.length} models in chain failed (last=${model}):`, err);
 			}
-			throw err;
 		}
 	}
-	return doCall(false);
+	throw lastErr;
+
+	/** 单模型调用：含 response_format 不兼容时去参重试一次 */
+	async function callModel(model: string): Promise<string> {
+		if (jsonOutput) {
+			try {
+				return await doCall(model, true);
+			} catch (err) {
+				// 模型不支持 response_format：去掉参数重试一次
+				if (isUnsupportedError(err)) {
+					return doCall(model, false);
+				}
+				throw err;
+			}
+		}
+		return doCall(model, false);
+	}
 
 	/** 执行一次流式调用，拼接并返回完整文本 */
-	async function doCall(withResponseFormat: boolean): Promise<string> {
+	async function doCall(model: string, withResponseFormat: boolean): Promise<string> {
 		const input: Record<string, unknown> = { messages, stream: true };
 		if (withResponseFormat) {
 			input.response_format = { type: 'json_object' };

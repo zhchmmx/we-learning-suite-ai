@@ -15,15 +15,15 @@ const OCR_PROMPT =
 
 /**
  * 对一批图片做 OCR，返回拼接后的文本。
- * 图片按 OCR_IMAGES_PER_CALL 分批，每批一次模型调用；批与批之间串行。
+ * 图片按 OCR_IMAGES_PER_CALL 分批，每批一次模型调用（链内 fallback）；批与批之间串行。
  */
 export async function ocrImages(opts: {
 	ai: Ai;
 	gatewayId: string;
-	model: string;
+	models: string[];
 	images: Array<{ base64: string; mimeType: string }>;
 }): Promise<string> {
-	const { ai, gatewayId, model, images } = opts;
+	const { ai, gatewayId, models, images } = opts;
 	const parts: string[] = [];
 
 	for (let i = 0; i < images.length; i += OCR_IMAGES_PER_CALL) {
@@ -40,7 +40,7 @@ export async function ocrImages(opts: {
 		const text = await chatCompletion({
 			ai,
 			gatewayId,
-			model,
+			models,
 			messages: [{ role: 'user', content }],
 			// 图片里没有文字时模型返回空内容是正常结果
 			allowEmpty: true,

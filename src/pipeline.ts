@@ -13,6 +13,7 @@ import {
 	validateQuestions,
 } from './services/generate';
 import { chatCompletion } from './services/llm';
+import { generateModels, ocrModels, planModels } from './services/models';
 import { ocrImages } from './services/ocr';
 import type { GeneratedQuestion, MaterialItem } from './types';
 
@@ -34,7 +35,7 @@ export async function runPlanningPhase(
 		const ocrText = await ocrImages({
 			ai: env.AI,
 			gatewayId: env.AI_GATEWAY_ID,
-			model: env.AI_OCR_MODEL,
+			models: ocrModels(env),
 			images: material.images,
 		});
 		corpus = [corpus, ocrText].filter(Boolean).join('\n\n');
@@ -55,7 +56,7 @@ export async function runPlanningPhase(
 	const planRaw = await chatCompletion({
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
-		model: env.AI_PLAN_MODEL,
+		models: planModels(env),
 		messages: [
 			{ role: 'system', content: PLAN_SYSTEM_PROMPT },
 			{ role: 'user', content: buildPlanUserPrompt(corpus) },
@@ -63,7 +64,7 @@ export async function runPlanningPhase(
 		jsonOutput: true,
 		maxTokens: PLAN_MAX_TOKENS,
 	});
-	console.log(`Plan generated (model=${env.AI_PLAN_MODEL})`);
+	console.log('Plan generated');
 
 	const planParsed = parseModelJson(planRaw) as Record<string, unknown> | null;
 	const plan: GenerationPlan = {
@@ -94,7 +95,7 @@ export async function runBatchGenerationPhase(
 	const batchRaw = await chatCompletion({
 		ai: env.AI,
 		gatewayId: env.AI_GATEWAY_ID,
-		model: env.AI_GENERATE_MODEL,
+		models: generateModels(env),
 		messages: [
 			{ role: 'system', content: GENERATE_SYSTEM_PROMPT },
 			{
@@ -105,7 +106,7 @@ export async function runBatchGenerationPhase(
 		jsonOutput: true,
 		maxTokens: GENERATION_MAX_TOKENS,
 	});
-	console.log(`Batch ${batchIndex}/${totalBatches} generated (model=${env.AI_GENERATE_MODEL}, raw length=${batchRaw.length})`);
+	console.log(`Batch ${batchIndex}/${totalBatches} generated (raw length=${batchRaw.length})`);
 
 	const questions = validateQuestions(parseModelJson(batchRaw));
 	const stems = extractStems(questions);
