@@ -33,7 +33,7 @@
 	"vars": {
 		// 模型选择开关："true" 直连 config.ts 里的具体模型链（代码内按序 fallback）；
 		// "false" 恢复 AI Gateway dynamic 路由（下方三个 AI_*_MODEL 路由名）
-		"USE_DIRECT_MODELS": "true",
+		"USE_DIRECT_MODELS": "false",
 		// AI Gateway 路由名（三阶段各一个，Gateway 负责模型选择与 fallback）。
 		// 当前被 USE_DIRECT_MODELS="true" 旁路，暂不使用；改回 "false" 即恢复。
 		"AI_GENERATE_MODEL": "dynamic/generate_auto",
