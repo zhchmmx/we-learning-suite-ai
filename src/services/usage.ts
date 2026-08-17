@@ -20,7 +20,7 @@ export interface MonthlyUsage {
 	tokensOut: number;
 }
 
-const PER_PAGE = 100;
+const PER_PAGE = 50;
 /** 翻页上限：40 页 × 100 条 = 4000 条；正常量级远达不到，防失控兜底 */
 const MAX_PAGES = 40;
 /** 单页请求超时 */
