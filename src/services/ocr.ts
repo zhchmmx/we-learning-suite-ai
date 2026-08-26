@@ -8,10 +8,10 @@ import { chatCompletion } from './llm';
  */
 
 const OCR_PROMPT =
-	'请把图片中的文字内容逐字转录出来，保持原有的段落结构。' +
-	'公式、表格、列表请尽量用纯文本方式保留其含义。' +
-	'只输出转录的文字本身，不要添加任何解释、前后缀或 markdown 标记。' +
-	'如果图片中没有任何可识别的文字，只输出一个空行。';
+	'Transcribe every word in the image verbatim, preserving original paragraph structure. ' +
+	'Render formulas, tables, and lists as plain text while preserving their structure and meaning. ' +
+	'Output ONLY the transcribed text — no explanations, introductions, prefixes, suffixes, or markdown formatting. ' +
+	'If the image contains no recognizable text, output a single blank line.';
 
 /**
  * 对一批图片做 OCR，返回拼接后的文本。

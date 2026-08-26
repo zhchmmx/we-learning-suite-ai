@@ -36,7 +36,8 @@ B）材料是知识性文本（课文、笔记、讲义等，没有现成题目�
    - 情况 B（材料为知识文本）：根据内容量和知识点密度自行判断，确保覆盖主要知识点。
 4. types：从材料中题目的实际类型选取（情况 A），或根据材料特点选择最合适的 2~4 种题型（情况 B）。
    可选项："single_answer"（单选）、"multiple_answer"（多选）、"true_false"（判断）、
-   "fill_blank"（填空）、"short_answer"（简答）。`;
+   "fill_blank"（填空）、"short_answer"（简答）。
+5. ⚠️ 你的判断和思考过程应贴合材料的语言；若输出中包含任何自然语言说明（本提示词已禁止，但作为兜底规则），其语言必须与材料语言一致。JSON 结构字段（totalCount、types）和题型枚举值必须保持英文小写，不得翻译。`;
 
 export function buildPlanUserPrompt(materialText: string): string {
 	return `请分析以下学习材料，判断其性质并制定出题计划：
@@ -74,7 +75,9 @@ export const GENERATE_SYSTEM_PROMPT = `你是一款学习应用的出题专家�
 5. 题目内容必须严格来自所给材料，不得编造材料中不存在的事实。
 6. 根据材料特点选择题型，干扰项要有迷惑性但不能正确。
 7. 严禁输出上述五种以外的题型，否则该题将被丢弃。
-8. 如果提供了"已生成题目"列表，请避免与它们重复——考查同一知识点时须换角度或换题型。`;
+8. 如果提供了"已生成题目"列表，请避免与它们重复——考查同一知识点时须换角度或换题型。
+9. 语言一致性（强制）：所有题目内容中的自然语言（题干 stem、选项 options、答案 correct、填空可接受答案 accept、简答题参考答案、tags 标签文本等）必须与用户上传的学习材料使用同一语言。材料为中文则全部用中文出题，为英文则全部用英文出题，为日文则全部用日文出题，以此类推。
+10. JSON 字段和枚举不变（强制）：JSON 的键名（questions、type、content、stem、options、answer、correctIndex、correctIndices、correct、accept、tags 等）和题型枚举值（single_answer、multiple_answer、true_false、fill_blank、short_answer）必须保持为原英文小写，不得翻译。`;
 
 /**
  * 构建分批生成的用户提示词。
