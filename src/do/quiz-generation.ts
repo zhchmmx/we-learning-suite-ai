@@ -266,7 +266,9 @@ export class QuizGenerationDO implements DurableObject {
 		if (err instanceof ApiClientError && err.status < 500) {
 			console.warn(`Session ${task.ticket} cancelled or ticket invalid:`, err.message);
 		} else {
-			console.error(`Task failed for session ${task.ticket}:`, err);
+			// 消息内联进日志行：结构化日志对 Error 对象的序列化不稳定，消息文本会丢
+			const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+			console.error(`Task failed for session ${task.ticket}: ${detail}`, err);
 		}
 
 		// 尽力把 session 标记为 failed（可能也因同样原因失败，忽略）；

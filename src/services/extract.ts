@@ -65,6 +65,18 @@ function countNonWhitespace(text: string): number {
 	return text.replace(/\s+/g, '').length;
 }
 
+/** 尽力字符串化 toMarkdown 抛出的错误（绑定层错误对象的字段经常缺失，消息也可能为空） */
+function describeConversionError(err: unknown): string {
+	if (!err || typeof err !== 'object') return String(err);
+	const e = err as { name?: string; message?: string; status?: number; cause?: unknown };
+	const parts: string[] = [];
+	if (e.name && e.name !== 'Error') parts.push(e.name);
+	if (e.message) parts.push(e.message);
+	if (e.status !== undefined) parts.push(`status=${e.status}`);
+	if (e.cause) parts.push(`cause=${e.cause instanceof Error ? e.cause.message : String(e.cause)}`);
+	return parts.length > 0 ? parts.join(', ') : String(err);
+}
+
 /** 调 AI.toMarkdown 把文档转成 Markdown；加密/损坏/转换失败统一抛 TaskError */
 async function convertToMarkdown(ai: Ai, buffer: ArrayBuffer, mimeType: string, label: string): Promise<string> {
 	const extension = MIME_TO_EXTENSION[mimeType] ?? 'bin';
@@ -75,9 +87,9 @@ async function convertToMarkdown(ai: Ai, buffer: ArrayBuffer, mimeType: string, 
 			{ conversionOptions: { pdf: { metadata: false } } },
 		);
 	} catch (err) {
-		// 不在此打 error 日志：PDF 抛错是预期中的降级分支（调用方转分块扫描并记 warn），
-		// 真正的任务失败由 DO 的 handleTaskError 统一记录
-		throw new TaskError(`第 ${label} 个文档转换失败，文件可能已加密或损坏`);
+		const detail = describeConversionError(err);
+		console.warn(`toMarkdown 调用失败（mime=${mimeType}, size=${buffer.byteLength} bytes）: ${detail}`);
+		throw new TaskError(`第 ${label} 个文档转换失败（${detail}），文件可能已加密或损坏`);
 	}
 	if (response.format === 'error') {
 		throw new TaskError(`第 ${label} 个文档转换失败：${response.error}`);
