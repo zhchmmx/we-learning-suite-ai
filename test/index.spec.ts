@@ -1,9 +1,9 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseProviders } from "../src/config";
 import { QuizGenerationDO } from "../src/do/quiz-generation";
 import { parseModelJson, validateQuestions } from "../src/services/generate";
-import { createScanSession, runScanRound } from "../src/services/pdf-scan";
-import { SCAN_CHUNK_BYTES } from "../src/config";
+import { walkProviderChain } from "../src/services/providers";
 import worker from "../src/index";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
@@ -53,111 +53,6 @@ function makeEnv(overrides: Record<string, unknown>): Env {
 	return { ...env, ...overrides } as unknown as Env;
 }
 
-/** 构造假 Ai 绑定：替换 toMarkdown；gateway 用本地桩（测试沙箱里真实远程绑定会挂起） */
-function makeAi(toMarkdown: Ai["toMarkdown"]): Ai {
-	return {
-		toMarkdown,
-		gateway: (_id: string) => ({ getUrl: async () => "https://gateway.test/v1/test-gw/" }),
-	} as unknown as Ai;
-}
-
-function toMarkdownOk(data: string) {
-	return vi.fn(async () => ({
-		id: "conv-1",
-		name: "material.pdf",
-		mimeType: "application/pdf",
-		format: "markdown" as const,
-		tokens: 1,
-		data,
-	}));
-}
-
-/** 内存版 R2 bucket：支持 Range 读，记录 put / delete 便于断言 */
-function makeFakeBucket() {
-	const store = new Map<string, Uint8Array>();
-	const puts: string[] = [];
-	const deletes: string[][] = [];
-	const bucket = {
-		async get(key: string, options?: { range?: { offset: number; length: number } }) {
-			const bytes = store.get(key);
-			if (!bytes) return null;
-			const offset = options?.range?.offset ?? 0;
-			const length = options?.range?.length ?? bytes.length - offset;
-			const slice = bytes.slice(offset, Math.min(bytes.length, offset + length));
-			return {
-				arrayBuffer: async () => slice.buffer,
-				size: slice.length,
-			};
-		},
-		async put(key: string, value: Uint8Array | ArrayBuffer) {
-			const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-			store.set(key, bytes.slice());
-			puts.push(key);
-			return { size: bytes.length };
-		},
-		async delete(keys: string | string[]) {
-			const list = Array.isArray(keys) ? keys : [keys];
-			deletes.push(list);
-			for (const k of list) store.delete(k);
-		},
-	} as unknown as R2Bucket;
-	return { bucket, store, puts, deletes };
-}
-
-/** 构造假 JPEG：SOI/EOI 魔数 + 填充 */
-function makeJpeg(size: number): Uint8Array {
-	const bytes = new Uint8Array(Math.max(size, 4));
-	bytes[0] = 0xff;
-	bytes[1] = 0xd8;
-	bytes[2] = 0xff;
-	bytes[bytes.length - 2] = 0xff;
-	bytes[bytes.length - 1] = 0xd9;
-	return bytes;
-}
-
-/** 构造伪"扫描件 PDF"：对象字典 + DCTDecode 流（流内容 = 给定 JPEG 字节） */
-function buildScannedPdf(jpeg: Uint8Array, padBefore = 0): Uint8Array {
-	const encoder = new TextEncoder();
-	const pad = new Uint8Array(padBefore); // 全零填充，不含干扰标记
-	const dict = encoder.encode(
-		`1 0 obj\n<< /Type /XObject /Subtype /Image /Width 1000 /Height 1400 /Filter /DCTDecode /Length ${jpeg.length} >>\nstream\n`,
-	);
-	const tail = encoder.encode("\nendstream\nendobj\n");
-	const header = encoder.encode("%PDF-1.4\n");
-	const out = new Uint8Array(header.length + pad.length + dict.length + jpeg.length + tail.length);
-	let at = 0;
-	out.set(header, at);
-	at += header.length;
-	out.set(pad, at);
-	at += pad.length;
-	out.set(dict, at);
-	at += dict.length;
-	out.set(jpeg, at);
-	at += jpeg.length;
-	out.set(tail, at);
-	return out;
-}
-
-/** 常用：放行续期/入库/状态的 API 回调 mock，并记录调用 */
-function makeOkApiWorker(calls: string[], captured?: { uploadedBody?: { questions?: unknown[] } }) {
-	return makeApiWorker(async (url, init) => {
-		if (url.includes("/api/quiz/sessions/") && url.endsWith("/renew")) {
-			calls.push("renew");
-			return jsonResponse({ data: { ok: true } });
-		}
-		if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
-			calls.push("patch");
-			return jsonResponse({ data: {} });
-		}
-		if (url.includes("/api/quiz/questions/batch")) {
-			calls.push("batch");
-			if (captured) captured.uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
-			return jsonResponse({ data: { inserted: 2 } }, 201);
-		}
-		return new Response(`unexpected API call: ${url}`, { status: 599 });
-	});
-}
-
 const VALID_QUESTIONS_JSON = JSON.stringify({
 	questions: [
 		{
@@ -173,15 +68,6 @@ const VALID_QUESTIONS_JSON = JSON.stringify({
 		},
 	],
 });
-
-const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer", "true_false"] });
-
-/** 语料足够长的转换结果（超过 SCAN_MIN_CHARS=100 的非空白字符） */
-const RICH_MARKDOWN =
-	"光合作用是植物利用光能，将二氧化碳和水转化为有机物并释放氧气的过程。" +
-	"它分为光反应与暗反应两个阶段，发生在叶绿体中，是地球生态系统能量输入的主要途径。" +
-	"光反应在类囊体薄膜上进行，水被分解为氧气和氢离子，同时生成 ATP 与 NADPH；" +
-	"暗反应在叶绿体基质中进行，利用上述能量物质将二氧化碳固定并还原为糖类。";
 
 beforeEach(() => {
 	// 默认拒绝一切未配置的外呼，避免测试误触真实网络
@@ -293,20 +179,24 @@ describe("POST /api/quiz/generate", () => {
 	});
 });
 
-// ===== OCR 端点（异步：委托 OCRProcessingDO，返回 taskId） =====
+// ===== OCR 端点 =====
 
 describe("POST /api/ocr", () => {
+	const OCR_PROVIDERS = JSON.stringify([
+		{
+			name: "main",
+			priority: 1,
+			baseUrl: "https://provider.test/v1",
+			generateModel: "gen-m",
+			ocrModel: "ocr-m",
+		},
+	]);
+
+	// 一张 1x1 的假 PNG（base64）
 	const FAKE_IMAGE = { data: "aGVsbG8=", mimeType: "image/png" };
 
-	function makeFakeOcrDO() {
-		const fetchStub = vi.fn(async () => new Response(null, { status: 202 }));
-		const namespace = {
-			idFromName: (name: string) => ({ name }),
-			get: (_id: unknown) => ({ fetch: fetchStub }),
-		} as unknown as Env["OCR_DO"];
-		return { namespace, fetchStub };
-	}
-
+	// 注：生产环境本端点无公网入口（workers_dev: false，仅 Service Binding 可达），
+	// 测试直接调 worker.fetch 等价于内部调用，无需鉴权用例
 	async function postOcr(body: unknown, customEnv: Env) {
 		const request = new IncomingRequest("http://example.com/api/ocr", {
 			method: "POST",
@@ -318,42 +208,61 @@ describe("POST /api/ocr", () => {
 	}
 
 	it("rejects empty images array with 400", async () => {
-		const { namespace } = makeFakeOcrDO();
-		const response = await postOcr({ images: [] }, makeEnv({ OCR_DO: namespace }));
+		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [] }, customEnv);
 		expect(response.status).toBe(400);
 	});
 
 	it("rejects unsupported mime type with 400", async () => {
-		const { namespace } = makeFakeOcrDO();
-		const response = await postOcr(
-			{ images: [{ data: "aGVsbG8=", mimeType: "image/gif" }] },
-			makeEnv({ OCR_DO: namespace }),
-		);
+		const customEnv = makeEnv({ AI_PROVIDERS: OCR_PROVIDERS });
+		const response = await postOcr({ images: [{ data: "aGVsbG8=", mimeType: "image/gif" }] }, customEnv);
 		expect(response.status).toBe(400);
 	});
 
-	it("dispatches to OCR DO and returns 202 with taskId", async () => {
-		const { namespace, fetchStub } = makeFakeOcrDO();
-		const response = await postOcr(
-			{ userId: "u-1", images: [FAKE_IMAGE] },
-			makeEnv({ OCR_DO: namespace }),
-		);
-		expect(response.status).toBe(202);
-		const body = (await response.json()) as { data: { taskId: string; status: string } };
-		expect(body.data.status).toBe("processing");
-		expect(body.data.taskId).toBeTruthy();
+	it("returns 502 when no provider has ocrModel", async () => {
+		const noOcr = JSON.stringify([
+			{ name: "main", priority: 1, baseUrl: "https://provider.test/v1", generateModel: "gen-m" },
+		]);
+		const customEnv = makeEnv({
+			AI_PROVIDERS: noOcr,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
+		expect(response.status).toBe(502);
+	});
 
-		expect(fetchStub).toHaveBeenCalledTimes(1);
-		const [url, init] = fetchStub.mock.calls[0];
-		expect(url).toBe("http://do/ocr");
-		const payload = JSON.parse(String(init?.body)) as {
-			taskId: string;
-			userId: string;
-			images: Array<{ base64: string; mimeType: string }>;
-		};
-		expect(payload.taskId).toBe(body.data.taskId);
-		expect(payload.userId).toBe("u-1");
-		expect(payload.images).toEqual([{ base64: FAKE_IMAGE.data, mimeType: FAKE_IMAGE.mimeType }]);
+	it("happy path: calls OCR model and returns text", async () => {
+		stubFetch((url) => {
+			if (url.includes("/chat/completions")) {
+				return sseResponse("转录出来的文字");
+			}
+			return new Response(`unexpected: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			AI_PROVIDERS: OCR_PROVIDERS,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
+		expect(response.status).toBe(200);
+		const body = (await response.json()) as { data: { text: string } };
+		expect(body.data.text).toBe("转录出来的文字");
+	});
+
+	it("returns 422 when OCR result is empty", async () => {
+		stubFetch((url) => {
+			if (url.includes("/chat/completions")) {
+				return sseResponse("   ");
+			}
+			return new Response(`unexpected: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			AI_PROVIDERS: OCR_PROVIDERS,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+		});
+		const response = await postOcr({ images: [FAKE_IMAGE] }, customEnv);
+		expect(response.status).toBe(422);
 	});
 });
 
@@ -396,89 +305,6 @@ describe("queue consumer", () => {
 		await expect(worker.queue(makeBatch("t-q-2"), makeEnv({ QUIZ_DO: namespace }))).resolves.toBeUndefined();
 		expect(fetchStub).toHaveBeenCalledTimes(1);
 	});
-});
-
-// ===== pdf-scan：分块扫描器（内存桶单元测试） =====
-
-describe("pdf-scan runScanRound", () => {
-	it("extracts an embedded DCTDecode JPEG into temp R2 keys", async () => {
-		const jpeg = makeJpeg(12 * 1024);
-		const { bucket, store } = makeFakeBucket();
-		store.set("scan.pdf", buildScannedPdf(jpeg));
-
-		let session = createScanSession([{ r2Key: "scan.pdf", size: (store.get("scan.pdf") as Uint8Array).length }], 15);
-		const round = await runScanRound(bucket, "u-1", "t-scan", session);
-		session = round.session;
-
-		expect(round.done).toBe(true);
-		expect(round.extractedKeys).toHaveLength(1);
-		expect(round.extractedKeys[0]).toBe("u-1/tmp/scan/t-scan/p1.jpg");
-		const saved = store.get("u-1/tmp/scan/t-scan/p1.jpg") as Uint8Array;
-		expect(saved.length).toBe(jpeg.length);
-		expect(saved[0]).toBe(0xff);
-		expect(saved[1]).toBe(0xd8);
-	});
-
-	it("detects a marker that straddles the 4MB chunk boundary via carry", async () => {
-		const jpeg = makeJpeg(12 * 1024);
-		// 让 `/DCTDecode` 标记恰好横跨第一块（4MB）边界：
-		// 计算字典+流的长度，倒推填充量，使标记起点 = SCAN_CHUNK_BYTES - 5
-		const probe = buildScannedPdf(jpeg, 0);
-		const markerOffsetInProbe = indexOfAscii(probe, "/DCTDecode");
-		const padBefore = SCAN_CHUNK_BYTES - 5 - markerOffsetInProbe;
-		expect(padBefore).toBeGreaterThan(0);
-
-		const pdf = buildScannedPdf(jpeg, padBefore);
-		const { bucket, store } = makeFakeBucket();
-		store.set("big-scan.pdf", pdf);
-
-		let session = createScanSession([{ r2Key: "big-scan.pdf", size: pdf.length }], 15);
-
-		const round1 = await runScanRound(bucket, "u-1", "t-split", session);
-		session = round1.session;
-		expect(round1.done).toBe(false);
-		expect(round1.extractedKeys).toHaveLength(0); // 标记被边界截断，本轮看不见
-
-		const round2 = await runScanRound(bucket, "u-1", "t-split", session);
-		session = round2.session;
-		expect(round2.done).toBe(true);
-		expect(round2.extractedKeys).toHaveLength(1); // carry 补全后命中并抽取
-	});
-
-	it("skips images below the minimum size (logos/icons)", async () => {
-		const jpeg = makeJpeg(4 * 1024); // < MIN_SCAN_IMAGE_BYTES(10KB)
-		const { bucket, store } = makeFakeBucket();
-		store.set("scan.pdf", buildScannedPdf(jpeg));
-
-		const session = createScanSession([{ r2Key: "scan.pdf", size: (store.get("scan.pdf") as Uint8Array).length }], 15);
-		const round = await runScanRound(bucket, "u-1", "t-small", session);
-
-		expect(round.done).toBe(true);
-		expect(round.extractedKeys).toHaveLength(0);
-	});
-
-	it("returns zero extracted for bytes without image streams", async () => {
-		const { bucket, store } = makeFakeBucket();
-		store.set("noimg.pdf", new TextEncoder().encode("%PDF-1.4\nno image objects here\n"));
-
-		const session = createScanSession([{ r2Key: "noimg.pdf", size: 29 }], 15);
-		const round = await runScanRound(bucket, "u-1", "t-none", session);
-
-		expect(round.done).toBe(true);
-		expect(round.extractedKeys).toHaveLength(0);
-	});
-
-	/** 字节序列中查找 ASCII 子串（测试辅助） */
-	function indexOfAscii(haystack: Uint8Array, needle: string): number {
-		const n = new TextEncoder().encode(needle);
-		outer: for (let i = 0; i + n.length <= haystack.length; i++) {
-			for (let j = 0; j < n.length; j++) {
-				if (haystack[i + j] !== n[j]) continue outer;
-			}
-			return i;
-		}
-		return -1;
-	}
 });
 
 // ===== QuizGenerationDO：alarm 状态机驱动完整管线 =====
@@ -552,7 +378,26 @@ describe("QuizGenerationDO alarm state machine", () => {
 			httpMetadata: { contentType: "text/plain" },
 		});
 
-		const apiWorker = makeOkApiWorker(calls, captured);
+		// 规划阶段输出：2 道题，1 个批次即可生成完
+		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer", "true_false"] });
+
+		// Service Binding 回调（续期 / 入库）走 API_WORKER.fetch
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.includes("/api/quiz/sessions/") && url.endsWith("/renew")) {
+				calls.push("renew");
+				return jsonResponse({ data: { ok: true } });
+			}
+			if (url.includes("/api/quiz/sessions/") && url.endsWith("/status")) {
+				calls.push("patch");
+				return jsonResponse({ data: { status: "failed" } });
+			}
+			if (url.includes("/api/quiz/questions/batch")) {
+				calls.push("batch");
+				captured.uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
+				return jsonResponse({ data: { inserted: 2 } }, 201);
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
 
 		// 模型调用走全局 fetch：第 1 次返回规划，第 2 次返回题目（流式 SSE）
 		stubFetch(async (url) => {
@@ -565,11 +410,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			AI: makeAi(toMarkdownOk("unused") as unknown as Ai["toMarkdown"]),
-		});
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
 		const { instance, mock } = await startTask(customEnv, "t-do-1", [
 			{ r2Key: "material.txt", mimeType: "text/plain" },
 		]);
@@ -581,254 +422,40 @@ describe("QuizGenerationDO alarm state machine", () => {
 		// 终态检查：任务完成、语料已释放
 		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
 		expect(mock.data.has("corpus")).toBe(false);
-	}, 30_000);
+	});
 
-	it("digital PDF: AI.toMarkdown converts and pipeline completes", async () => {
-		const calls: string[] = [];
-		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
-		let llmCallCount = 0;
+	it("unsupported format marks session failed without uploading", async () => {
+		const patches: Array<{ status: string }> = [];
 
-		const fake = makeFakeBucket();
-		fake.store.set("doc.pdf", new TextEncoder().encode("%PDF-1.4 fake digital pdf"));
-		const toMarkdown = toMarkdownOk(RICH_MARKDOWN);
+		// 使用内存 mock R2 bucket，返回不支持的 PDF 格式
+		const mockR2 = {
+			async get(_key: string) {
+				return {
+					text: async () => "fake-content",
+					arrayBuffer: async () => new ArrayBuffer(0),
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				};
+			},
+		} as unknown as R2Bucket;
 
-		const apiWorker = makeOkApiWorker(calls, captured);
-		stubFetch(async (url) => {
-			if (url.includes("/chat/completions")) {
-				calls.push("llm");
-				llmCallCount++;
-				return sseResponse(llmCallCount === 1 ? PLAN_JSON : VALID_QUESTIONS_JSON);
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.includes("/sessions/") && url.endsWith("/status")) {
+				patches.push(JSON.parse(String(init?.body)) as { status: string });
+				return jsonResponse({ data: {} });
 			}
-			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+			if (url.includes("/sessions/") && url.endsWith("/renew")) {
+				return jsonResponse({ data: { ok: true } });
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-pdf-digital", [
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key", R2_BUCKET: mockR2 });
+		const { instance, mock } = await startTask(customEnv, "t-do-2", [
 			{ r2Key: "doc.pdf", mimeType: "application/pdf" },
 		]);
 		await runUntilIdle(instance, mock);
 
-		expect(toMarkdown).toHaveBeenCalledTimes(1);
-		expect(captured.uploadedBody?.questions).toHaveLength(2);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
-	}, 30_000);
-
-	it("docx: AI.toMarkdown converts and pipeline completes", async () => {
-		const calls: string[] = [];
-		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
-		let llmCallCount = 0;
-
-		const fake = makeFakeBucket();
-		fake.store.set("notes.docx", new Uint8Array([0x50, 0x4b, 0x03, 0x04]));
-		const toMarkdown = toMarkdownOk(RICH_MARKDOWN);
-
-		const apiWorker = makeOkApiWorker(calls, captured);
-		stubFetch(async (url) => {
-			if (url.includes("/chat/completions")) {
-				llmCallCount++;
-				return sseResponse(llmCallCount === 1 ? PLAN_JSON : VALID_QUESTIONS_JSON);
-			}
-			return new Response(`unexpected fetch: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-docx", [
-			{ r2Key: "notes.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-		]);
-		await runUntilIdle(instance, mock);
-
-		expect(toMarkdown).toHaveBeenCalledTimes(1);
-		expect(captured.uploadedBody?.questions).toHaveLength(2);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
-	}, 30_000);
-
-	it("scanned PDF: empty toMarkdown output triggers chunked scan -> OCR -> pipeline completes", async () => {
-		const calls: string[] = [];
-		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
-		let llmCallCount = 0;
-
-		const jpeg = makeJpeg(12 * 1024);
-		const fake = makeFakeBucket();
-		fake.store.set("scan.pdf", buildScannedPdf(jpeg));
-		// 转换结果几乎为空 → 判定扫描件
-		const toMarkdown = toMarkdownOk("   ");
-
-		const apiWorker = makeOkApiWorker(calls, captured);
-		stubFetch(async (url) => {
-			if (url.includes("/chat/completions")) {
-				calls.push("llm");
-				llmCallCount++;
-				// 1: OCR 转录；2: 规划；3: 出题
-				const content = llmCallCount === 1 ? "转录出的课文：光合作用是植物利用光能合成有机物的过程。"
-					: llmCallCount === 2 ? PLAN_JSON : VALID_QUESTIONS_JSON;
-				return sseResponse(content);
-			}
-			return new Response(`unexpected fetch: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-scan-pdf", [
-			{ r2Key: "scan.pdf", mimeType: "application/pdf" },
-		]);
-		await runUntilIdle(instance, mock);
-
-		// toMarkdown 调过一次（判定为扫描件），页图抽出并走完 OCR → 规划 → 出题 → 入库
-		expect(toMarkdown).toHaveBeenCalledTimes(1);
-		expect(captured.uploadedBody?.questions).toHaveLength(2);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
-		// 临时页图创建后被清理
-		expect(fake.puts.some((k) => k.startsWith("u-1/tmp/scan/t-scan-pdf/"))).toBe(true);
-		expect(fake.deletes.flat().some((k) => k.startsWith("u-1/tmp/scan/t-scan-pdf/"))).toBe(true);
-		expect(fake.store.size === 1 && fake.store.has("scan.pdf")).toBe(true);
-	}, 30_000);
-
-	it("scanned PDF: toMarkdown throwing degrades to chunked scan -> OCR -> pipeline completes", async () => {
-		const calls: string[] = [];
-		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
-		let llmCallCount = 0;
-
-		const jpeg = makeJpeg(12 * 1024);
-		const fake = makeFakeBucket();
-		fake.store.set("scan-err.pdf", buildScannedPdf(jpeg));
-		// 转换直接抛错（部分扫描件的真实行为）→ 应降级为分块扫描而不是失败
-		const toMarkdown = vi.fn(async () => {
-			throw new Error("transform backend error");
-		});
-
-		const apiWorker = makeOkApiWorker(calls, captured);
-		stubFetch(async (url) => {
-			if (url.includes("/chat/completions")) {
-				llmCallCount++;
-				const content = llmCallCount === 1 ? "转录出的课文：光合作用是植物利用光能合成有机物的过程。"
-					: llmCallCount === 2 ? PLAN_JSON : VALID_QUESTIONS_JSON;
-				return sseResponse(content);
-			}
-			return new Response(`unexpected fetch: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-scan-err-pdf", [
-			{ r2Key: "scan-err.pdf", mimeType: "application/pdf" },
-		]);
-		await runUntilIdle(instance, mock);
-
-		expect(toMarkdown).toHaveBeenCalledTimes(1);
-		expect(captured.uploadedBody?.questions).toHaveLength(2);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
-		expect(fake.puts.some((k) => k.startsWith("u-1/tmp/scan/t-scan-err-pdf/"))).toBe(true);
-	}, 30_000);
-
-	it("PDF over 32MB skips toMarkdown and goes straight to scanning", async () => {
-		const bigPdf = new Uint8Array(33 * 1024 * 1024); // 全零，无图可抽
-		const fake = makeFakeBucket();
-		fake.store.set("huge.pdf", bigPdf);
-		const toMarkdown = vi.fn();
-
-		const patches: Array<{ status: string }> = [];
-		const apiWorker = makeApiWorker(async (url, init) => {
-			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
-			if (url.endsWith("/status")) {
-				patches.push(JSON.parse(String(init?.body)) as { status: string });
-				return jsonResponse({ data: {} });
-			}
-			return new Response(`unexpected API call: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-huge-pdf", [
-			{ r2Key: "huge.pdf", mimeType: "application/pdf" },
-		]);
-		await runUntilIdle(instance, mock);
-
-		// 超大 PDF 不调 toMarkdown（内存护栏），直入扫描；无图可抽 → 失败
-		expect(toMarkdown).not.toHaveBeenCalled();
-		expect(patches).toEqual([{ status: "failed" }]);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
-	});
-
-	it("scanned PDF without extractable images fails with a clear error", async () => {
-		const fake = makeFakeBucket();
-		fake.store.set("empty-scan.pdf", new TextEncoder().encode("%PDF-1.4\nno image objects\n"));
-		const toMarkdown = toMarkdownOk(""); // 空输出 → 扫描件
-
-		const patches: Array<{ status: string }> = [];
-		const apiWorker = makeApiWorker(async (url, init) => {
-			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
-			if (url.endsWith("/status")) {
-				patches.push(JSON.parse(String(init?.body)) as { status: string });
-				return jsonResponse({ data: {} });
-			}
-			return new Response(`unexpected API call: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-empty-scan", [
-			{ r2Key: "empty-scan.pdf", mimeType: "application/pdf" },
-		]);
-		await runUntilIdle(instance, mock);
-
-		expect(patches).toEqual([{ status: "failed" }]);
-		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
-	});
-
-	it("encrypted/corrupted document: toMarkdown failure marks session failed", async () => {
-		const fake = makeFakeBucket();
-		fake.store.set("locked.docx", new Uint8Array([0x50, 0x4b]));
-		const toMarkdown = vi.fn(async () => {
-			throw new Error("conversion backend error");
-		});
-
-		const patches: Array<{ status: string }> = [];
-		const apiWorker = makeApiWorker(async (url, init) => {
-			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
-			if (url.endsWith("/status")) {
-				patches.push(JSON.parse(String(init?.body)) as { status: string });
-				return jsonResponse({ data: {} });
-			}
-			return new Response(`unexpected API call: ${url}`, { status: 599 });
-		});
-
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			R2_BUCKET: fake.bucket,
-			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
-		});
-		const { instance, mock } = await startTask(customEnv, "t-locked", [
-			{ r2Key: "locked.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-		]);
-		await runUntilIdle(instance, mock);
-
+		// 仅一次回调：规划阶段失败后标记 failed，没有入库
 		expect(patches).toEqual([{ status: "failed" }]);
 		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
 	});
@@ -839,6 +466,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 		await env.R2_BUCKET.put("material-cancel.txt", "光合作用相关材料内容", {
 			httpMetadata: { contentType: "text/plain" },
 		});
+		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer"] });
 
 		const apiWorker = makeApiWorker(async (url, init) => {
 			if (url.endsWith("/renew")) {
@@ -865,11 +493,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			AI: makeAi(toMarkdownOk("unused") as unknown as Ai["toMarkdown"]),
-		});
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
 		const { instance, mock } = await startTask(customEnv, "t-do-3", [
 			{ r2Key: "material-cancel.txt", mimeType: "text/plain" },
 		]);
@@ -878,7 +502,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 		// planning(llm) → 续期被 403 拒绝（取消信号）→ 中止 → 标记 failed，不再生成也不再上传
 		expect(calls).toEqual(["llm", "renew-rejected", "patch-failed"]);
 		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
-	}, 30_000);
+	});
 
 	it("duplicate delivery for the same ticket is rejected (idempotency guard)", async () => {
 		let llmCalls = 0;
@@ -886,6 +510,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 		await env.R2_BUCKET.put("material-dup.txt", "重复投递测试材料", {
 			httpMetadata: { contentType: "text/plain" },
 		});
+		const PLAN_JSON = JSON.stringify({ totalCount: 1, types: ["true_false"] });
 
 		const apiWorker = makeApiWorker(async (url) => {
 			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
@@ -902,11 +527,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({
-			API_WORKER: apiWorker,
-			CF_AIG_TOKEN: "test-token",
-			AI: makeAi(toMarkdownOk("unused") as unknown as Ai["toMarkdown"]),
-		});
+		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
 		const materials = [{ r2Key: "material-dup.txt", mimeType: "text/plain" }];
 		const { instance, mock } = await startTask(customEnv, "t-do-4", materials);
 		await runUntilIdle(instance, mock);
@@ -924,7 +545,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 		expect(dupRes.status).toBe(409);
 		await runUntilIdle(instance, mock);
 		expect(llmCalls).toBe(llmCallsAfterFirstRun);
-	}, 30_000);
+	});
 });
 
 // ===== 题目校验规则 =====
@@ -982,7 +603,7 @@ describe("validateQuestions", () => {
 				questions: [
 					{
 						type: "multiple_answer",
-						content: { stem: "题", options: ["A", "B", "C", "D"] },
+						content: { stem: "题", options: ["A", "B", "C"] },
 						answer: { correctIndices: [0] },
 					},
 				],
@@ -1045,5 +666,52 @@ describe("validateQuestions", () => {
 	it("strips code fences before parsing", () => {
 		const parsed = parseModelJson('```json\n{"questions": []}\n```');
 		expect(parsed).toEqual({ questions: [] });
+	});
+});
+
+// ===== 提供商链故障切换 =====
+
+describe("walkProviderChain", () => {
+	const providers = parseProviders(
+		JSON.stringify([
+			{ name: "a", priority: 1, baseUrl: "http://a.test/v1", generateModel: "m" },
+			{ name: "b", priority: 2, baseUrl: "http://b.test/v1", generateModel: "m" },
+		]),
+	);
+
+	it("falls back to next provider on failure", async () => {
+		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
+		const { result, provider } = await walkProviderChain(chainEnv, providers, async (p) => {
+			if (p.name === "a") throw new Error("500 boom");
+			return "ok";
+		});
+		expect(result).toBe("ok");
+		expect(provider.name).toBe("b");
+	}, 15_000);
+
+	it("throws when all providers fail", async () => {
+		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
+		await expect(
+			walkProviderChain(chainEnv, providers, async () => {
+				throw new Error("boom");
+			}),
+		).rejects.toThrow("boom");
+	}, 15_000);
+
+	it("skips providers without ocrModel when filter applied", async () => {
+		const withOcr = parseProviders(
+			JSON.stringify([
+				{ name: "a", priority: 1, baseUrl: "http://a.test/v1", generateModel: "m" },
+				{ name: "b", priority: 2, baseUrl: "http://b.test/v1", generateModel: "m", ocrModel: "ocr" },
+			]),
+		);
+		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
+		const { provider } = await walkProviderChain(
+			chainEnv,
+			withOcr,
+			async () => "ok",
+			(p) => !!p.ocrModel,
+		);
+		expect(provider.name).toBe("b");
 	});
 });

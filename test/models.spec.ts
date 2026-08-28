@@ -6,10 +6,10 @@ import { generateModels, ocrModels, planModels } from "../src/services/models";
 // 复用 wrangler.jsonc + .dev.vars 的真实变量，验证模型解析与开关行为
 describe("model chain resolution", () => {
 	it("direct mode resolves plan/generate/ocr chains from config", () => {
-		const directEnv = { ...env, USE_DIRECT_MODELS: "true" };
-		expect(planModels(directEnv)).toEqual([...PLAN_MODEL_CHAIN]);
-		expect(generateModels(directEnv)).toEqual([...GENERATE_MODEL_CHAIN]);
-		expect(ocrModels(directEnv)).toEqual([...OCR_MODEL_CHAIN]);
+		expect(env.USE_DIRECT_MODELS).toBe("true");
+		expect(planModels(env)).toEqual([...PLAN_MODEL_CHAIN]);
+		expect(generateModels(env)).toEqual([...GENERATE_MODEL_CHAIN]);
+		expect(ocrModels(env)).toEqual([...OCR_MODEL_CHAIN]);
 	});
 
 	it("route mode maps dynamic routes to provider/model targets", () => {
