@@ -1,7 +1,7 @@
 import { GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
 import { uploadQuestions } from './services/api-client';
 import { scanCorpus } from './services/content-scan';
-import { readFromR2, TaskError } from './services/extract';
+import { readFromR2, ScanRequiredSignal, TaskError } from './services/extract';
 import {
 	buildBatchUserPrompt,
 	buildPlanUserPrompt,
@@ -27,8 +27,11 @@ export async function runPlanningPhase(
 	userId: string,
 	materials: MaterialItem[],
 ): Promise<{ plan: GenerationPlan; corpus: string }> {
-	// 从 R2 直读材料 + 格式分诊
-	const material = await readFromR2(env.R2_BUCKET, materials);
+	// 从 R2 直读材料 + 格式分诊（文档类走 AI.toMarkdown；扫描件/超大 PDF 会要求分块扫描）
+	const { material, scanRequired } = await readFromR2(env.R2_BUCKET, env.AI, materials);
+	if (scanRequired.length > 0) {
+		throw new ScanRequiredSignal(scanRequired);
+	}
 
 	// 图片走 OCR 转文字（生成永远只吃文本）
 	let corpus = material.texts.join('\n\n');

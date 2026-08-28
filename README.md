@@ -171,24 +171,31 @@ npx wrangler deploy
 
 ## 当前边界（v1）
 
-- 支持格式：TXT、Markdown、JPEG/PNG/WebP 图片（单张 ≤4MB，≤15 张）
-- PDF / Office 在出题管线里依然会被拒绝——转码发生在客户端上传前：带文字层的 PDF 抽成文本、扫描件渲染成图片走 `/api/ocr`，服务器只存文本（we-learning-suite-api 上传白名单强制）。所以本 Worker 出题时收到的只会是文本
-- `/api/ocr` 同样服务于客户端上传前的图片/扫描件转码（经 API 项目 Service Binding 中转）
-- 不做：CORS（无浏览器调用方）、用量日志、限流、长文档自动分段、流式输出
+- 支持格式：TXT、Markdown、PDF、docx / xlsx / xls / odt / ods、HTML / XML / CSV、JPEG/PNG/WebP 图片（图片单张 ≤4MB，≤15 张）；PPTX / .doc / .ppt 不支持（转换服务不覆盖）
+- 客户端直传原始文档，转换发生在本 Worker 出题时：`AI.toMarkdown` 把文档转成 Markdown 再进入出题模型；图片走 OCR 通道（PaddleOCR-VL）
+- 扫描件/超大 PDF：toMarkdown 无页面级 OCR，输出过少（或 >32MB 跳过转换）时进入 QuizGenerationDO 的 `scanning` 阶段——每轮 alarm 用 R2 Range 读一个 4MB 块续扫（免费版 CPU 预算），抽出内嵌页图（DCTDecode JPEG）转投 OCR 通道；任意大小的扫描件都支持，只是墙钟变长。少见编码（JPEG2000/CCITT）抽不到页图时会失败并给出文案
+- `/api/ocr` 保留，供旧版客户端向后兼容（新版客户端直传原文件，不再调用）
+- 不做：CORS（无浏览器调用方）、限流、长文档自动分段、流式输出
 
 ## 项目结构
 
 ```
 src/
-  index.ts               # Hono 入口（/health、/api/quiz/generate、/api/ocr）+ queue 消费者导出
+  index.ts               # Hono 入口（/health、/api/quiz/generate、/api/ocr、/api/usage）+ queue 消费者导出
   types.ts               # 类型定义
-  config.ts              # 限制常量 + AI_PROVIDERS 解析
-  pipeline.ts            # 队列消费主流程 + 错误分类（重试 vs 终结）
+  config.ts              # 限制常量 + 模型链 + MIME 白名单/映射
+  pipeline.ts            # 三阶段管线（规划 / 分批生成 / 上传）
+  do/
+    quiz-generation.ts   # 出题状态机（pending→planning→[scanning]→generating→uploading）
+    ocr-processing.ts    # /api/ocr 异步 OCR 状态机
   services/
     api-client.ts        # 回调 we-learning-suite-api（PATCH 状态 / questions/batch）
-    providers.ts         # 提供商链式路由（故障切换）
-    llm.ts               # chat completions 调用（response_format 兼容回退；OCR 允许空输出）
+    llm.ts               # chat completions 流式调用（经 AI Gateway）
+    models.ts            # 模型选择（直连链 / Gateway 路由）
     ocr.ts               # 图片 OCR
-    extract.ts           # 下载 + 格式分诊
+    extract.ts           # R2 直读 + 格式分诊（文档走 AI.toMarkdown）
+    pdf-scan.ts          # 扫描件分块扫描器（抽取内嵌页图）
     generate.ts          # 提示词 + JSON 解析 + 逐题校验
+    content-scan.ts      # Waffo 内容审核（输入/输出侧）
+    usage.ts             # AI Gateway 日志用量聚合
 ```

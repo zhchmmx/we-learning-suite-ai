@@ -1,7 +1,9 @@
 import { runPlanningPhase, runBatchGenerationPhase, runUploadPhase } from '../pipeline';
 import { ApiClientError, patchSessionStatus, renewTicket } from '../services/api-client';
 import { ContentScanError, scanQuestionBatch } from '../services/content-scan';
-import { GENERATION_BATCH_SIZE } from '../config';
+import { ScanRequiredSignal, TaskError } from '../services/extract';
+import { createScanSession, runScanRound, type ScanSession } from '../services/pdf-scan';
+import { GENERATION_BATCH_SIZE, IMAGE_MIME_TYPES, MAX_IMAGES, MAX_SCAN_PAGES } from '../config';
 import type { GenerationPlan } from '../services/generate';
 import type { GeneratedQuestion, MaterialItem } from '../types';
 
@@ -9,15 +11,16 @@ import type { GeneratedQuestion, MaterialItem } from '../types';
  * DO 持久状态（每个 ticket 一个实例）
  *
  * 驱动整个出题管线的状态机：
- * pending → planning → generating (×N batches) → uploading → done
- * 任何阶段出错 → failed
+ * pending → planning → [scanning (×N rounds)] → planning(恢复) → generating (×N batches) → uploading → done
+ * planning 检出扫描件/超大 PDF 时进入 scanning：每轮 alarm 只扫一个块（免费版 CPU 预算），
+ * 抽出的页图以图片材料身份替代原 PDF 后恢复 planning。任何阶段出错 → failed
  */
 interface TaskState {
 	ticket: string;
 	/** 发起用户 ID（随任务持久化，供各阶段调用模型时标识） */
 	userId: string;
 	materials: MaterialItem[];
-	phase: 'pending' | 'planning' | 'generating' | 'uploading' | 'done' | 'failed';
+	phase: 'pending' | 'planning' | 'scanning' | 'generating' | 'uploading' | 'done' | 'failed';
 	plan: GenerationPlan | null;
 	batchIndex: number;
 	totalBatches: number;
@@ -25,6 +28,10 @@ interface TaskState {
 	allStems: string[];
 	/** 当前批是否已因输出侧内容审核 block 重生成过一次（每批最多一次） */
 	batchScanRetried: boolean;
+	/** 扫描件分块扫描会话（仅 scanning 阶段非空） */
+	scan: ScanSession | null;
+	/** 扫描抽出的临时页图 R2 key（完成/失败时清理） */
+	scanTempKeys: string[];
 }
 
 /**
@@ -69,6 +76,8 @@ export class QuizGenerationDO implements DurableObject {
 			allQuestions: [],
 			allStems: [],
 			batchScanRetried: false,
+			scan: null,
+			scanTempKeys: [],
 		};
 
 		await this.state.storage.put('task', task);
@@ -90,7 +99,25 @@ export class QuizGenerationDO implements DurableObject {
 				task.phase = 'planning';
 				await this.state.storage.put('task', task);
 
-				const { plan, corpus } = await runPlanningPhase(this.env, task.ticket, task.userId, task.materials);
+				let plan: GenerationPlan;
+				let corpus: string;
+				try {
+					({ plan, corpus } = await runPlanningPhase(this.env, task.ticket, task.userId, task.materials));
+				} catch (err) {
+					if (err instanceof ScanRequiredSignal) {
+						// 扫描件/超大 PDF：切换到分块扫描阶段，每轮 alarm 只扫一个块（免费版 CPU 预算）
+						const imageCount = task.materials.filter((m) =>
+							IMAGE_MIME_TYPES.has((m.mimeType || '').toLowerCase()),
+						).length;
+						const budget = Math.max(0, Math.min(MAX_SCAN_PAGES, MAX_IMAGES - imageCount));
+						task.scan = createScanSession(err.scans, budget);
+						task.phase = 'scanning';
+						await this.state.storage.put('task', task);
+						await this.scheduleAlarm();
+						return;
+					}
+					throw err;
+				}
 
 				// 规划阶段可能已耗时较长：续期 ticket，同时检测取消信号（4xx 抛出 → 中止）
 				await this.checkAndRenewTicket(task.ticket);
@@ -102,6 +129,39 @@ export class QuizGenerationDO implements DurableObject {
 
 				await this.state.storage.put('task', task);
 				await this.state.storage.put('corpus', corpus);
+				await this.scheduleAlarm();
+			} else if (task.phase === 'scanning') {
+				// ── 分块扫描：每轮 alarm 只扫一个块，直到抽够页图或扫到文件尾 ──
+				if (!task.scan) {
+					throw new Error('Missing scan session state');
+				}
+				await this.checkAndRenewTicket(task.ticket);
+
+				const round = await runScanRound(this.env.R2_BUCKET, task.userId, task.ticket, task.scan);
+				task.scan = round.session;
+				task.scanTempKeys.push(...round.extractedKeys);
+				await this.state.storage.put('task', task);
+
+				if (!round.done) {
+					await this.scheduleAlarm();
+					return;
+				}
+
+				// 扫描完成：把被扫描的 PDF 换成抽出的页图，回到 pending 重新走规划
+				const scannedKeys = new Set(task.scan.targets.map((t) => t.r2Key));
+				const remaining = task.materials.filter((m) => !scannedKeys.has(m.r2Key));
+				if (task.scanTempKeys.length === 0 && remaining.length === 0) {
+					throw new TaskError(
+						'未能从该文档提取到文字或页图（可能是暂不支持编码的扫描件或空白文档），请上传文字版 PDF 或图片',
+					);
+				}
+				task.materials = [
+					...remaining,
+					...task.scanTempKeys.map((r2Key) => ({ r2Key, mimeType: 'image/jpeg' })),
+				];
+				task.scan = null;
+				task.phase = 'pending';
+				await this.state.storage.put('task', task);
 				await this.scheduleAlarm();
 			} else if (task.phase === 'generating') {
 				// ── 分批生成：每轮 alarm 只跑一批 ──
@@ -171,6 +231,7 @@ export class QuizGenerationDO implements DurableObject {
 				await this.state.storage.put('task', task);
 				// 释放语料（大文本，不再需要）
 				await this.state.storage.delete('corpus');
+				await this.cleanupScanTemp(task);
 			}
 			// phase === 'done' | 'failed' → 不调度 alarm，自然结束
 		} catch (err) {
@@ -220,6 +281,17 @@ export class QuizGenerationDO implements DurableObject {
 		task.phase = 'failed';
 		await this.state.storage.put('task', task);
 		await this.state.storage.delete('corpus');
+		await this.cleanupScanTemp(task);
+	}
+
+	/** 尽力清理扫描抽出的临时页图（R2 生命周期规则会在 1 天后兜底过期） */
+	private async cleanupScanTemp(task: TaskState): Promise<void> {
+		if (task.scanTempKeys.length === 0) return;
+		try {
+			await this.env.R2_BUCKET.delete(task.scanTempKeys);
+		} catch (err) {
+			console.warn('Failed to clean up scan temp objects (non-fatal):', err);
+		}
 	}
 
 	/**
