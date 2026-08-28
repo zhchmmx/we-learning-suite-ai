@@ -173,7 +173,7 @@ npx wrangler deploy
 
 - 支持格式：TXT、Markdown、PDF、docx / xlsx / xls / odt / ods、HTML / XML / CSV、JPEG/PNG/WebP 图片（图片单张 ≤4MB，≤15 张）；PPTX / .doc / .ppt 不支持（转换服务不覆盖）
 - 客户端直传原始文档，转换发生在本 Worker 出题时：`AI.toMarkdown` 把文档转成 Markdown 再进入出题模型；图片走 OCR 通道（PaddleOCR-VL）
-- 扫描件/超大 PDF：toMarkdown 无页面级 OCR，输出过少（或 >32MB 跳过转换）时进入 QuizGenerationDO 的 `scanning` 阶段——每轮 alarm 用 R2 Range 读一个 4MB 块续扫（免费版 CPU 预算），抽出内嵌页图（DCTDecode JPEG）转投 OCR 通道；任意大小的扫描件都支持，只是墙钟变长。少见编码（JPEG2000/CCITT）抽不到页图时会失败并给出文案
+- 扫描件/超大 PDF：toMarkdown 无页面级 OCR，转换抛错、输出过少（或 >32MB 跳过转换）时进入 QuizGenerationDO 的 `scanning` 阶段——每轮 alarm 用 R2 Range 读一个 4MB 块续扫（免费版 CPU 预算），抽出内嵌页图（DCTDecode JPEG）转投 OCR 通道；任意大小的扫描件都支持，只是墙钟变长。少见编码（JPEG2000/CCITT）抽不到页图时会失败并给出文案
 - `/api/ocr` 保留，供旧版客户端向后兼容（新版客户端直传原文件，不再调用）
 - 不做：CORS（无浏览器调用方）、限流、长文档自动分段、流式输出
 

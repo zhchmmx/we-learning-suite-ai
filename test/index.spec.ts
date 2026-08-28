@@ -697,6 +697,47 @@ describe("QuizGenerationDO alarm state machine", () => {
 		expect(fake.store.size === 1 && fake.store.has("scan.pdf")).toBe(true);
 	}, 30_000);
 
+	it("scanned PDF: toMarkdown throwing degrades to chunked scan -> OCR -> pipeline completes", async () => {
+		const calls: string[] = [];
+		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
+		let llmCallCount = 0;
+
+		const jpeg = makeJpeg(12 * 1024);
+		const fake = makeFakeBucket();
+		fake.store.set("scan-err.pdf", buildScannedPdf(jpeg));
+		// 转换直接抛错（部分扫描件的真实行为）→ 应降级为分块扫描而不是失败
+		const toMarkdown = vi.fn(async () => {
+			throw new Error("transform backend error");
+		});
+
+		const apiWorker = makeOkApiWorker(calls, captured);
+		stubFetch(async (url) => {
+			if (url.includes("/chat/completions")) {
+				llmCallCount++;
+				const content = llmCallCount === 1 ? "转录出的课文：光合作用是植物利用光能合成有机物的过程。"
+					: llmCallCount === 2 ? PLAN_JSON : VALID_QUESTIONS_JSON;
+				return sseResponse(content);
+			}
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			CF_AIG_TOKEN: "test-token",
+			R2_BUCKET: fake.bucket,
+			AI: makeAi(toMarkdown as unknown as Ai["toMarkdown"]),
+		});
+		const { instance, mock } = await startTask(customEnv, "t-scan-err-pdf", [
+			{ r2Key: "scan-err.pdf", mimeType: "application/pdf" },
+		]);
+		await runUntilIdle(instance, mock);
+
+		expect(toMarkdown).toHaveBeenCalledTimes(1);
+		expect(captured.uploadedBody?.questions).toHaveLength(2);
+		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
+		expect(fake.puts.some((k) => k.startsWith("u-1/tmp/scan/t-scan-err-pdf/"))).toBe(true);
+	}, 30_000);
+
 	it("PDF over 32MB skips toMarkdown and goes straight to scanning", async () => {
 		const bigPdf = new Uint8Array(33 * 1024 * 1024); // 全零，无图可抽
 		const fake = makeFakeBucket();

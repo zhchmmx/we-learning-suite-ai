@@ -14,7 +14,7 @@ import type { ExtractedMaterial, MaterialItem } from '../types';
  * 从 R2 存储桶直接读取材料 + 格式分诊。
  * 文本文件（txt/md）→ 原文进文本通道；图片（jpg/png/webp）→ base64 待 OCR；
  * 文档（PDF/Office/HTML/CSV）→ AI.toMarkdown 转 Markdown 进文本通道，
- * 其中 PDF 转不出文字（扫描件）或超过体积上限时返回 scanRequired 信号，
+ * 其中 PDF 在转换抛错、转不出文字（扫描件）或超过体积上限时返回 scanRequired 信号，
  * 由 Durable Object 走分块扫描兜底；其他格式 → 抛错。
  *
  * 不走公网预签名 URL：通过 Workers R2 Binding 内网直读，零延迟、零鉴权开销。
@@ -75,7 +75,8 @@ async function convertToMarkdown(ai: Ai, buffer: ArrayBuffer, mimeType: string, 
 			{ conversionOptions: { pdf: { metadata: false } } },
 		);
 	} catch (err) {
-		console.error(`toMarkdown failed for ${label}:`, err);
+		// 不在此打 error 日志：PDF 抛错是预期中的降级分支（调用方转分块扫描并记 warn），
+		// 真正的任务失败由 DO 的 handleTaskError 统一记录
 		throw new TaskError(`第 ${label} 个文档转换失败，文件可能已加密或损坏`);
 	}
 	if (response.format === 'error') {
@@ -134,19 +135,30 @@ export async function readFromR2(
 				throw new TaskError(`第 ${label} 个文档超过大小上限（${MAX_DOCUMENT_BYTES / 1024 / 1024}MB），请拆分后重试`);
 			}
 
-			const markdown = await convertToMarkdown(ai, buffer, contentType, label);
-
-			// toMarkdown 对 PDF 没有页面级 OCR：输出过少说明是扫描件，交给分块扫描兜底
+			// PDF 专属降级：toMarkdown 对部分扫描件/结构异常的 PDF 会直接抛错（而不是返回空文本），
+			// 抛错与输出过少同样转入分块扫描兜底
 			if (contentType === 'application/pdf') {
+				let markdown: string;
+				try {
+					markdown = await convertToMarkdown(ai, buffer, contentType, label);
+				} catch (err) {
+					console.warn(`第 ${label} 个 PDF 转换失败，转入分块扫描兜底:`, err);
+					scanRequired.push({ r2Key: item.r2Key, size: object.size });
+					continue;
+				}
 				if (countNonWhitespace(markdown) < SCAN_MIN_CHARS) {
 					scanRequired.push({ r2Key: item.r2Key, size: object.size });
 					continue;
 				}
-			} else if (!markdown) {
-				throw new TaskError(`第 ${label} 个文档未能提取到任何文本内容`);
+				material.texts.push(markdown);
+				continue;
 			}
 
-			if (markdown) material.texts.push(markdown);
+			const markdown = await convertToMarkdown(ai, buffer, contentType, label);
+			if (!markdown) {
+				throw new TaskError(`第 ${label} 个文档未能提取到任何文本内容`);
+			}
+			material.texts.push(markdown);
 			continue;
 		}
 
