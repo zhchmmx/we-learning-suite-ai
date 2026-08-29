@@ -28,7 +28,12 @@ export async function runPlanningPhase(
 	materials: MaterialItem[],
 ): Promise<{ plan: GenerationPlan; corpus: string }> {
 	// 从 R2 直读材料 + 格式分诊
-	const material = await readFromR2(env.R2_BUCKET, materials);
+	const material = await readFromR2({
+		bucket: env.R2_BUCKET,
+		materials,
+		ai: env.AI,
+		gatewayId: env.AI_GATEWAY_ID,
+	});
 
 	// 图片走 OCR 转文字（生成永远只吃文本）
 	let corpus = material.texts.join('\n\n');

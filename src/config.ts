@@ -63,3 +63,19 @@ export const MAX_MATERIALS = 50;
 export const TEXT_MIME_TYPES = new Set(['text/plain', 'text/markdown', 'text/x-markdown']);
 export const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
+/** 文档通道：MIME → toMarkdown 转换所需的扩展名（name 必须带扩展名供服务识别格式） */
+export const DOCUMENT_MIME_TO_EXTENSION: ReadonlyMap<string, string> = new Map([
+	['application/pdf', '.pdf'],
+	['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
+	['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+]);
+
+/** 单个文档大小上限（转换前用 R2Object.size 检查，保护堆内存与转换服务） */
+export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
+
+/** PDF toMarkdown 产出少于此（去空白后字符数）视为扫描件，尝试抽图 OCR */
+export const SCANNED_PDF_THRESHOLD_CHARS = 200;
+
+/** 扫描件抽取：小于此字节的 JPEG 视为缩略图/误匹配，丢弃 */
+export const MIN_SCAN_IMAGE_BYTES = 20 * 1024;
+

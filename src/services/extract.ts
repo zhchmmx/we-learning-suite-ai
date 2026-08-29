@@ -1,12 +1,20 @@
-import { IMAGE_MIME_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES, TEXT_MIME_TYPES } from '../config';
+import {
+	DOCUMENT_MIME_TO_EXTENSION,
+	IMAGE_MIME_TYPES,
+	MAX_DOCUMENT_BYTES,
+	MAX_IMAGE_BYTES,
+	MAX_IMAGES,
+	SCANNED_PDF_THRESHOLD_CHARS,
+	TEXT_MIME_TYPES,
+} from '../config';
 import type { ExtractedMaterial, MaterialItem } from '../types';
+import { extractPdfImages } from './pdf-scan';
 
 /**
  * 从 R2 存储桶直接读取材料 + 格式分诊。
  * 文本文件（txt/md）→ 原文进文本通道；图片（jpg/png/webp）→ base64 待 OCR；
+ * 文档（PDF/DOCX/XLSX）→ toMarkdown 转文本，扫描件 PDF 兜底抽图进 OCR 通道；
  * 其他格式 → 抛错。
- *
- * 不走公网预签名 URL：通过 Workers R2 Binding 内网直读，零延迟、零鉴权开销。
  */
 
 /** 任务级失败：原因可直接写进 session 日志 / 返回给调用方 */
@@ -18,7 +26,10 @@ export class TaskError extends Error {
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
-	const bytes = new Uint8Array(buffer);
+	return uint8ToBase64(new Uint8Array(buffer));
+}
+
+function uint8ToBase64(bytes: Uint8Array): string {
 	let binary = '';
 	const chunkSize = 0x8000;
 	for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -27,10 +38,13 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 	return btoa(binary);
 }
 
-export async function readFromR2(
-	bucket: R2Bucket,
-	materials: MaterialItem[],
-): Promise<ExtractedMaterial> {
+export async function readFromR2(opts: {
+	bucket: R2Bucket;
+	materials: MaterialItem[];
+	ai: Ai;
+	gatewayId: string;
+}): Promise<ExtractedMaterial> {
+	const { bucket, materials, ai, gatewayId } = opts;
 	const material: ExtractedMaterial = { texts: [], images: [] };
 
 	for (const [index, item] of materials.entries()) {
@@ -62,8 +76,46 @@ export async function readFromR2(
 			continue;
 		}
 
+		const ext = DOCUMENT_MIME_TO_EXTENSION.get(contentType);
+		if (ext) {
+			if (object.size > MAX_DOCUMENT_BYTES) {
+				throw new TaskError(
+					`第 ${index + 1} 个文件过大（上限 ${MAX_DOCUMENT_BYTES / 1024 / 1024}MB），请拆分后重试`,
+				);
+			}
+			const buffer = await object.arrayBuffer();
+			const baseName = item.r2Key.split('/').pop() || `material-${index + 1}`;
+			const fileName = baseName.endsWith(ext) ? baseName : `${baseName}${ext}`;
+
+			let result: ConversionResponse;
+			try {
+				result = await ai.toMarkdown(
+					{ name: fileName, blob: new Blob([buffer], { type: 'application/octet-stream' }) },
+					{ gateway: { id: gatewayId } },
+				);
+			} catch (err) {
+				throw new TaskError(
+					`第 ${index + 1} 个文件转换失败：${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+
+			const isPdf = contentType === 'application/pdf';
+			if (result.format === 'markdown') {
+				const text = result.data.trim();
+				if (text) material.texts.push(text);
+				if (isPdf && text.replace(/\s+/g, '').length < SCANNED_PDF_THRESHOLD_CHARS) {
+					scanPdfIntoImages(buffer, material);
+				}
+			} else if (isPdf) {
+				scanPdfIntoImages(buffer, material);
+			} else {
+				throw new TaskError(`第 ${index + 1} 个文件转换失败：${result.error}`);
+			}
+			continue;
+		}
+
 		throw new TaskError(
-			`不支持的文件格式（${contentType || '未知'}）。当前支持：TXT、Markdown、JPEG/PNG/WebP 图片`,
+			`不支持的文件格式（${contentType || '未知'}）。当前支持：TXT、Markdown、PDF、DOCX、XLSX、JPEG/PNG/WebP 图片`,
 		);
 	}
 
@@ -72,4 +124,14 @@ export async function readFromR2(
 	}
 
 	return material;
+}
+
+function scanPdfIntoImages(buffer: ArrayBuffer, material: ExtractedMaterial): void {
+	const budget = MAX_IMAGES - material.images.length;
+	if (budget <= 0) return;
+	const pages = extractPdfImages(new Uint8Array(buffer), budget);
+	for (const page of pages) {
+		material.images.push({ base64: uint8ToBase64(page), mimeType: 'image/jpeg' });
+	}
+	console.log(`Scanned PDF: extracted ${pages.length} page image(s) for OCR`);
 }
