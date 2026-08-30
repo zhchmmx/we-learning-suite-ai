@@ -7,6 +7,9 @@ import {
 } from './config';
 import { ApiClientError, patchSessionStatus } from './services/api-client';
 import { currentBeijingMonth, fetchMonthlyUsage, isValidYm } from './services/usage';
+import { readFromR2 } from './services/extract';
+import { ocrImages } from './services/ocr';
+import { ocrModels } from './services/models';
 import type { AppEnv, GenerateMessage, MaterialItem } from './types';
 
 // wrangler 要求 Durable Object 类从入口模块导出(durable_objects.class_name 解析到这里)
@@ -245,6 +248,68 @@ app.get('/api/usage', async (c) => {
 		);
 		return c.json({ error: '用量服务暂时不可用' }, 502);
 	}
+});
+
+/**
+ * POST /api/debug/extract —— 本地调试：直传文件字节，走完整提取链路看效果
+ *
+ * 安全三层：云端无公网入口（外部不可达）+ 云端 ENABLE_DEBUG_EXTRACT=false（内部转发也 404）
+ *           + 可选 DEBUG_EXTRACT_TOKEN 密钥兜底。
+ * Body: 文件二进制（Content-Type 标注格式，如 application/pdf）
+ * 返回: { data: { mimeType, texts, imageCount, ocrText, error?, ocrWarning? } }
+ */
+app.post('/api/debug/extract', async (c) => {
+	const env = c.env;
+	if (env.ENABLE_DEBUG_EXTRACT !== 'true') {
+		return c.json({ error: 'Not found' }, 404);
+	}
+	if (env.DEBUG_EXTRACT_TOKEN) {
+		const got = c.req.header('X-Debug-Token') || '';
+		if (got !== env.DEBUG_EXTRACT_TOKEN) {
+			return c.json({ error: 'Forbidden' }, 403);
+		}
+	}
+
+	const fileBuf = await c.req.arrayBuffer();
+	if (!fileBuf.byteLength) {
+		return c.json({ error: 'Empty body' }, 400);
+	}
+	const mimeType = (c.req.header('Content-Type') || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+
+	// 写入本地 R2 临时 key，完整复用 readFromR2 的分诊 / toMarkdown / 扫描件抽图
+	const r2Key = `debug/${crypto.randomUUID()}`;
+	await env.R2_BUCKET.put(r2Key, fileBuf, { httpMetadata: { contentType: mimeType } });
+
+	const out: Record<string, unknown> = { mimeType, texts: [], imageCount: 0, ocrText: '' };
+	try {
+		const material = await readFromR2({
+			bucket: env.R2_BUCKET,
+			materials: [{ r2Key, mimeType }],
+			ai: env.AI,
+			gatewayId: env.AI_GATEWAY_ID,
+		});
+		out.texts = material.texts;
+		out.imageCount = material.images.length;
+		if (material.images.length > 0) {
+			if (!env.CF_AIG_TOKEN) {
+				out.ocrWarning = 'CF_AIG_TOKEN 未配置（.dev.vars），已跳过 OCR';
+			} else {
+				out.ocrText = await ocrImages({
+					ai: env.AI,
+					gatewayId: env.AI_GATEWAY_ID,
+					authToken: env.CF_AIG_TOKEN,
+					models: ocrModels(env),
+					images: material.images,
+					userId: 'debug',
+				});
+			}
+		}
+	} catch (err) {
+		out.error = err instanceof Error ? err.message : String(err);
+	} finally {
+		await env.R2_BUCKET.delete(r2Key).catch(() => {});
+	}
+	return c.json({ data: out });
 });
 
 export default {

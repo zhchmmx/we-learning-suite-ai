@@ -31,6 +31,10 @@ export type AppEnv = {
 		CF_ACCOUNT_ID: string;
 		/** wrangler secret：AI Gateway 访问令牌（模型调用鉴权；已实测可查 Logs API） */
 		CF_AIG_TOKEN: string;
+		/** 本地调试端点开关：仅本地 .dev.vars=true；云端 wrangler.jsonc=false */
+		ENABLE_DEBUG_EXTRACT?: string;
+		/** 本地调试端点密钥（可选兜底，仅本地 .dev.vars 配） */
+		DEBUG_EXTRACT_TOKEN?: string;
 		QUIZ_QUEUE: Queue;
 		/** OCR 异步处理 Durable Object */
 		OCR_DO: DurableObjectNamespace;

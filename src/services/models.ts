@@ -24,7 +24,7 @@ export function generateModels(env: Env): ChatTarget[] {
 }
 
 /** OCR 模型链 */
-export function ocrModels(env: Env): ChatTarget[] {
+export function ocrModels(env: { USE_DIRECT_MODELS?: string; AI_OCR_MODEL: string }): ChatTarget[] {
 	return env.USE_DIRECT_MODELS === 'true'
 		? [...OCR_MODEL_CHAIN]
 		: [{ provider: 'dynamic', model: env.AI_OCR_MODEL.replace(/^dynamic\//, '') }];
