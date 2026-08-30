@@ -1,7 +1,7 @@
 import { GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
 import { uploadQuestions } from './services/api-client';
 import { scanCorpus } from './services/content-scan';
-import { readFromR2, TaskError } from './services/extract';
+import { readFromR2, ScanRequiredSignal, TaskError } from './services/extract';
 import {
 	buildBatchUserPrompt,
 	buildPlanUserPrompt,
@@ -15,7 +15,7 @@ import {
 import { chatCompletion } from './services/llm';
 import { generateModels, ocrModels, planModels } from './services/models';
 import { ocrImages } from './services/ocr';
-import type { GeneratedQuestion, MaterialItem } from './types';
+import type { ExtractedMaterial, GeneratedQuestion, MaterialItem } from './types';
 
 /**
  * 规划阶段：读材料 → OCR → 调模型 → 返回 plan + corpus。
@@ -26,17 +26,28 @@ export async function runPlanningPhase(
 	ticket: string,
 	userId: string,
 	materials: MaterialItem[],
+	extraCorpus = '',
 ): Promise<{ plan: GenerationPlan; corpus: string }> {
-	// 从 R2 直读材料 + 格式分诊
-	const material = await readFromR2({
-		bucket: env.R2_BUCKET,
-		materials,
-		ai: env.AI,
-		gatewayId: env.AI_GATEWAY_ID,
-	});
+	// 分诊与读取：先看 OCR 累积结果——扫描已消化全部材料时（materials 已移除被扫 PDF），
+	// 空材料不视为错误，corpus 直接以 OCR 语料为基础；否则正常读 R2 材料并检查扫描信号
+	let material: ExtractedMaterial;
+	if (materials.length === 0 && extraCorpus.trim().length > 0) {
+		material = { texts: [], images: [] };
+	} else {
+		const read = await readFromR2({
+			bucket: env.R2_BUCKET,
+			materials,
+			ai: env.AI,
+			gatewayId: env.AI_GATEWAY_ID,
+		});
+		if (read.scanRequired.length > 0) {
+			throw new ScanRequiredSignal(read.scanRequired);
+		}
+		material = read.material;
+	}
 
 	// 图片走 OCR 转文字（生成永远只吃文本）
-	let corpus = material.texts.join('\n\n');
+	let corpus = [material.texts.join('\n\n'), extraCorpus].filter(Boolean).join('\n\n');
 	if (material.images.length > 0) {
 		const ocrText = await ocrImages({
 			ai: env.AI,

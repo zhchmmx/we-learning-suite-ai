@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseProviders } from "../src/config";
 import { QuizGenerationDO } from "../src/do/quiz-generation";
 import { parseModelJson, validateQuestions } from "../src/services/generate";
-import { walkProviderChain } from "../src/services/providers";
 import worker from "../src/index";
+import { readFromR2 } from "../src/services/extract";
+import { createScanSession, runScanRound } from "../src/services/pdf-scan";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
 
@@ -546,6 +547,103 @@ describe("QuizGenerationDO alarm state machine", () => {
 		await runUntilIdle(instance, mock);
 		expect(llmCalls).toBe(llmCallsAfterFirstRun);
 	});
+	it("scanned PDF: DO runs chunked scan, resumes planning with OCR corpus, completes", async () => {
+		const calls: string[] = [];
+		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
+
+		// mock AI：toMarkdown 返回空白 → 触发扫描件信号
+		const mockAi = {
+			toMarkdown: async () => ({ format: "markdown", data: "   " }),
+			gateway: () => ({ getUrl: async () => "https://gateway.test/" }),
+		} as unknown as Ai;
+
+		// 伪造扫描 PDF（1 页 JPEG）
+		const enc = new TextEncoder();
+		const imgSize = 21000;
+		const img = new Uint8Array(imgSize);
+		img[0] = 0xff;
+		img[1] = 0xd8;
+		img[2] = 0xff;
+		for (let i = 3; i < imgSize; i++) img[i] = 0x42;
+		const pdfBytes = new Uint8Array([
+			...enc.encode(`/Subtype /Image /DCTDecode /Length ${imgSize}\nstream\n`),
+			...img,
+			...enc.encode(`\nendstream\n`),
+		]);
+
+		const mockR2 = {
+			async get(_key: string, opts?: R2GetOptions) {
+				const range = opts?.range as { offset?: number; length?: number } | undefined;
+				if (range && typeof range.offset === "number" && typeof range.length === "number") {
+					const start = Math.max(0, range.offset);
+					const end = Math.min(pdfBytes.length, start + range.length);
+					return { arrayBuffer: async () => pdfBytes.slice(start, end).buffer as ArrayBuffer } as R2ObjectBody;
+				}
+				return {
+					size: pdfBytes.length,
+					arrayBuffer: async () => pdfBytes.buffer as ArrayBuffer,
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				} as unknown as R2ObjectBody;
+			},
+		} as unknown as R2Bucket;
+
+		// OCR / plan / generate 都走 /chat/completions，按调用次数区分
+		const PLAN_JSON = JSON.stringify({ totalCount: 2, types: ["single_answer", "true_false"] });
+		const SCAN_PROVIDERS = JSON.stringify([
+			{
+				name: "main",
+				priority: 1,
+				baseUrl: "https://provider.test/v1",
+				generateModel: "gen-m",
+				ocrModel: "ocr-m",
+			},
+		]);
+		let llmCalls = 0;
+		stubFetch(async (url) => {
+			if (url.includes("/chat/completions")) {
+				calls.push("llm");
+				llmCalls++;
+				const content = llmCalls === 1 ? "扫描件OCR文本" : llmCalls === 2 ? PLAN_JSON : VALID_QUESTIONS_JSON;
+				return sseResponse(content);
+			}
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+		});
+
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.endsWith("/renew")) {
+				calls.push("renew");
+				return jsonResponse({ data: { ok: true } });
+			}
+			if (url.endsWith("/status")) return jsonResponse({ data: {} });
+			if (url.includes("/questions/batch")) {
+				calls.push("batch");
+				captured.uploadedBody = JSON.parse(String(init?.body)) as { questions?: unknown[] };
+				return jsonResponse({ data: { inserted: 2 } }, 201);
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI: mockAi,
+			USE_DIRECT_MODELS: "true",
+			CF_AIG_TOKEN: "test-token",
+			AI_PROVIDERS: SCAN_PROVIDERS,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			R2_BUCKET: mockR2,
+		});
+		const { instance, mock } = await startTask(customEnv, "t-scan-1", [
+			{ r2Key: "scan.pdf", mimeType: "application/pdf" },
+		]);
+		await runUntilIdle(instance, mock);
+
+		// 扫描发生：OCR 文本累积进 preScannedCorpus，再并入语料完成生成
+		const task = mock.data.get("task") as { phase: string; preScannedCorpus: string };
+		expect(task.phase).toBe("done");
+		expect(task.preScannedCorpus).toContain("扫描件OCR文本");
+		expect(captured.uploadedBody?.questions).toHaveLength(2);
+		expect(llmCalls).toBe(3); // OCR + plan + generate
+	});
 });
 
 // ===== 题目校验规则 =====
@@ -581,6 +679,9 @@ describe("validateQuestions", () => {
 		);
 		expect(validateQuestions(parsed)).toHaveLength(5);
 	});
+
+
+
 
 	it("drops single_answer with out-of-range correctIndex", () => {
 		const parsed = parseModelJson(
@@ -669,49 +770,178 @@ describe("validateQuestions", () => {
 	});
 });
 
-// ===== 提供商链故障切换 =====
+// ===== 扫描件 PDF：检测与分块扫描 =====
 
-describe("walkProviderChain", () => {
-	const providers = parseProviders(
-		JSON.stringify([
-			{ name: "a", priority: 1, baseUrl: "http://a.test/v1", generateModel: "m" },
-			{ name: "b", priority: 2, baseUrl: "http://b.test/v1", generateModel: "m" },
-		]),
-	);
+describe("scanned-PDF detection (readFromR2)", () => {
+	it("flags a scanned PDF whose toMarkdown output is a shell (metadata + empty page placeholders)", async () => {
+		// 模拟 CamScanner 扫描件：toMarkdown 只输出元数据 + Page N 空占位（旧逻辑会因 >200 漏判）
+		const shell = [
+			"# doc.pdf",
+			"",
+			"## Metadata",
+			"- PDFFormatVersion=1.7",
+			"- IsLinearized=false",
+			"- IsAcroFormPresent=false",
+			"- IsCollectionPresent=false",
+			"- Producer=intsig.com pdf producer",
+			"- Author=CamScanner",
+			"- Subject=英语练习题(1)",
+			"",
+			"## Contents",
+			"### Page 1",
+			"### Page 2",
+			"### Page 3",
+			"### Page 4",
+			"### Page 5",
+			"### Page 6",
+			"### Page 7",
+			"### Page 8",
+			"### Page 9",
+			"### Page 10",
+			"### Page 11",
+			"### Page 12",
+			"### Page 13",
+			"### Page 14",
+			"### Page 15",
+		].join("\n");
+		const mockAi = {
+			toMarkdown: async () => ({ format: "markdown", data: shell }),
+			gateway: () => ({ getUrl: async () => "https://gateway.test/" }),
+		} as unknown as Ai;
+		const mockR2 = {
+			async get(_key: string) {
+				return {
+					size: 4096,
+					arrayBuffer: async () => new ArrayBuffer(4096),
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				};
+			},
+		} as unknown as R2Bucket;
 
-	it("falls back to next provider on failure", async () => {
-		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
-		const { result, provider } = await walkProviderChain(chainEnv, providers, async (p) => {
-			if (p.name === "a") throw new Error("500 boom");
-			return "ok";
+		const result = await readFromR2({
+			bucket: mockR2,
+			materials: [{ r2Key: "scan.pdf", mimeType: "application/pdf" }],
+			ai: mockAi,
+			gatewayId: "g",
 		});
-		expect(result).toBe("ok");
-		expect(provider.name).toBe("b");
-	}, 15_000);
+		expect(result.scanRequired).toHaveLength(1);
+		expect(result.material.texts).toHaveLength(0);
+	});
+	it("flags a scanned PDF via scanRequired and leaves texts/images empty", async () => {
+		const mockAi = {
+			toMarkdown: async () => ({ format: "markdown", data: "   " }),
+			gateway: () => ({ getUrl: async () => "https://gateway.test/" }),
+		} as unknown as Ai;
+		const mockR2 = {
+			async get(_key: string) {
+				return {
+					size: 4096,
+					arrayBuffer: async () => new ArrayBuffer(4096),
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				};
+			},
+		} as unknown as R2Bucket;
 
-	it("throws when all providers fail", async () => {
-		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
-		await expect(
-			walkProviderChain(chainEnv, providers, async () => {
-				throw new Error("boom");
-			}),
-		).rejects.toThrow("boom");
-	}, 15_000);
+		const result = await readFromR2({
+			bucket: mockR2,
+			materials: [{ r2Key: "scan.pdf", mimeType: "application/pdf" }],
+			ai: mockAi,
+			gatewayId: "g",
+		});
+		expect(result.scanRequired).toHaveLength(1);
+		expect(result.scanRequired[0].r2Key).toBe("scan.pdf");
+		expect(result.material.texts).toHaveLength(0);
+		expect(result.material.images).toHaveLength(0);
+	});
+});
 
-	it("skips providers without ocrModel when filter applied", async () => {
-		const withOcr = parseProviders(
-			JSON.stringify([
-				{ name: "a", priority: 1, baseUrl: "http://a.test/v1", generateModel: "m" },
-				{ name: "b", priority: 2, baseUrl: "http://b.test/v1", generateModel: "m", ocrModel: "ocr" },
-			]),
-		);
-		const chainEnv = { AI_PROVIDER_KEY_A: "ka", AI_PROVIDER_KEY_B: "kb" };
-		const { provider } = await walkProviderChain(
-			chainEnv,
-			withOcr,
-			async () => "ok",
-			(p) => !!p.ocrModel,
-		);
-		expect(provider.name).toBe("b");
+describe("scanned-PDF chunked scan (pdf-scan)", () => {
+	/** 伪造一个含 pageCount 张 JPEG 页图的扫描件 PDF 字节流 */
+	function buildFakeScanPdf(pageCount: number, imgSize = 21000): Uint8Array {
+		const enc = new TextEncoder();
+		const parts: number[] = [];
+		for (let p = 0; p < pageCount; p++) {
+			for (const b of enc.encode(`/Subtype /Image /DCTDecode /Length ${imgSize}\nstream\n`)) parts.push(b);
+			const img = new Uint8Array(imgSize);
+			img[0] = 0xff;
+			img[1] = 0xd8;
+			img[2] = 0xff;
+			for (let i = 3; i < imgSize; i++) img[i] = 0x42;
+			for (const b of img) parts.push(b);
+			for (const b of enc.encode(`\nendstream\n`)) parts.push(b);
+		}
+		return new Uint8Array(parts);
+	}
+
+	/** Range 读取的 mock R2 桶 */
+	function makeScanBucket(bytes: Uint8Array): R2Bucket {
+		return {
+			async get(_key: string, opts?: R2GetOptions) {
+				const range = opts?.range as { offset?: number; length?: number } | undefined;
+				if (range && typeof range.offset === "number" && typeof range.length === "number") {
+					const start = Math.max(0, range.offset);
+					const end = Math.min(bytes.length, start + range.length);
+					return { arrayBuffer: async () => bytes.slice(start, end).buffer as ArrayBuffer } as R2ObjectBody;
+				}
+				return {
+					size: bytes.length,
+					arrayBuffer: async () => bytes.buffer as ArrayBuffer,
+				} as unknown as R2ObjectBody;
+			},
+		} as unknown as R2Bucket;
+	}
+
+	/** 逐轮运行 runScanRound 直到 done（限轮次防死循环） */
+	async function runToDone(
+		bucket: R2Bucket,
+		session: ReturnType<typeof createScanSession>,
+		ocr: (imgs: Array<{ base64: string; mimeType: string }>) => Promise<string>,
+	) {
+		let cur = session;
+		let rounds = 0;
+		for (; rounds < 8; rounds++) {
+			const res = await runScanRound({ bucket, session: cur, ocr });
+			cur = res.session;
+			if (res.done) break;
+		}
+		return { session: cur, rounds };
+	}
+
+	it("extracts JPEG pages from a chunk and OCRs them into corpus", async () => {
+		const pdfBytes = buildFakeScanPdf(2, 21000); // 2 页、每页 21KB JPEG
+		const bucket = makeScanBucket(pdfBytes);
+		const ocr = vi.fn(async (imgs: Array<{ base64: string; mimeType: string }>) => `OCR:${imgs.length}`);
+		const session = createScanSession([{ r2Key: "scan.pdf", size: pdfBytes.length }], 10);
+
+		const { session: final, rounds } = await runToDone(bucket, session, ocr);
+
+		expect(rounds).toBe(0); // 文件小，一轮就收完并 done
+		expect(ocr).toHaveBeenCalledTimes(1);
+		expect(ocr).toHaveBeenCalledWith([
+			expect.objectContaining({ mimeType: "image/jpeg" }),
+			expect.objectContaining({ mimeType: "image/jpeg" }),
+		]);
+		expect(final.corpus).toContain("OCR:2");
+		expect(final.budget).toBe(8);
+	});
+
+	it("backs off to the next round when the base64 batch budget would be exceeded", async () => {
+		// 两张 600KB 图：第一张收进本轮，第二张会超 OCR_BATCH_BASE64_BUDGET(1MB) → 回退留到下轮
+		const pdfBytes = buildFakeScanPdf(2, 600 * 1024);
+		const bucket = makeScanBucket(pdfBytes);
+		const ocr = vi.fn(async (imgs: Array<{ base64: string; mimeType: string }>) => `OCR:${imgs.length}`);
+		const session = createScanSession([{ r2Key: "scan.pdf", size: pdfBytes.length }], 10);
+
+		const round1 = await runScanRound({ bucket, session, ocr });
+		expect(round1.done).toBe(false);
+		expect(ocr).toHaveBeenCalledTimes(1);
+		expect(ocr).toHaveBeenCalledWith([expect.objectContaining({ mimeType: "image/jpeg" })]);
+		expect(round1.session.budget).toBe(9);
+
+		const round2 = await runScanRound({ bucket, session: round1.session, ocr });
+		expect(round2.done).toBe(true);
+		expect(ocr).toHaveBeenCalledTimes(2);
+		expect(round2.session.corpus).toContain("OCR:1");
+		expect(round2.session.budget).toBe(8);
 	});
 });

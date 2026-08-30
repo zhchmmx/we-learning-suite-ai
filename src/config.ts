@@ -75,7 +75,15 @@ export const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 
 /** PDF toMarkdown 产出少于此（去空白后字符数）视为扫描件，尝试抽图 OCR */
 export const SCANNED_PDF_THRESHOLD_CHARS = 200;
+export const SCANNED_PDF_STRIP_THRESHOLD_CHARS = 100; // 剥壳后正文阈值：纯扫描件 toMarkdown 只留模板壳，剥掉后正文极少
 
 /** 扫描件抽取：小于此字节的 JPEG 视为缩略图/误匹配，丢弃 */
 export const MIN_SCAN_IMAGE_BYTES = 20 * 1024;
+
+/** 扫描件分块扫描：每轮 alarm 从 R2 读取的块大小（免费 10ms CPU 预算内，单块 indexOf+窗口校验 <10ms） */
+export const SCAN_CHUNK_BYTES = 4 * 1024 * 1024;
+/** 扫描件分块扫描：块尾保留字节数（防 /DCTDecode 等标记横跨块边界漏检） */
+export const SCAN_CARRY_BYTES = 4 * 1024;
+/** 扫描件分块扫描：单轮 OCR 批次 base64 累计上限（保险丝：单页图再大也只单独走一轮，防止 base64 CPU 超预算） */
+export const OCR_BATCH_BASE64_BUDGET = 1 * 1024 * 1024;
 

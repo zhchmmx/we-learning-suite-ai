@@ -5,16 +5,16 @@ import {
 	MAX_IMAGE_BYTES,
 	MAX_IMAGES,
 	SCANNED_PDF_THRESHOLD_CHARS,
+	SCANNED_PDF_STRIP_THRESHOLD_CHARS,
 	TEXT_MIME_TYPES,
 } from '../config';
 import type { ExtractedMaterial, MaterialItem } from '../types';
-import { extractPdfImages } from './pdf-scan';
 
 /**
  * 从 R2 存储桶直接读取材料 + 格式分诊。
  * 文本文件（txt/md）→ 原文进文本通道；图片（jpg/png/webp）→ base64 待 OCR；
- * 文档（PDF/DOCX/XLSX）→ toMarkdown 转文本，扫描件 PDF 兜底抽图进 OCR 通道；
- * 其他格式 → 抛错。
+ * 文档（PDF/DOCX/XLSX）→ toMarkdown 转文本，扫描件 PDF 返回 scanRequired 信号
+ * 交由 DO 走分块扫描 OCR；其他格式 → 抛错。
  */
 
 /** 任务级失败：原因可直接写进 session 日志 / 返回给调用方 */
@@ -22,6 +22,55 @@ export class TaskError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = 'TaskError';
+	}
+}
+
+/**
+ * 剥掉 Cloudflare toMarkdown 对纯扫描件 PDF 输出的模板壳：
+ * - ## Metadata 段（固定元数据键值）
+ * - ### Page N 空页占位行（Page + 数字、无正文）
+ * 能剥多少剥多少；剥不掉的格式原样保留，调用方回退按总字符数判断（不报错）。
+ * 兼容 \n 与 \r\n 行尾。
+ */
+function stripToMarkdownShell(text: string): string {
+	const lines = text.split(/\r?\n/);
+	const kept: string[] = [];
+	let inMetadata = false;
+	for (const line of lines) {
+		// 进入 ## Metadata 段
+		if (/^##\s+Metadata\s*$/.test(line)) {
+			inMetadata = true;
+			continue;
+		}
+		// Metadata 段内：遇到下一个二级标题（## Contents 等）则出段，其余行丢弃
+		if (inMetadata) {
+			if (/^##\s+/.test(line)) inMetadata = false;
+			else continue;
+		}
+		// ### Page N 空占位：整行仅 Page + 数字，丢弃
+		if (/^###\s+Page\s+\d+\s*$/.test(line)) continue;
+		kept.push(line);
+	}
+	return kept.join('\n');
+}
+
+/** 需要 DO 分块扫描的 PDF（扫描件） */
+export interface ScanRequired {
+	r2Key: string;
+	size: number;
+}
+
+export interface ReadResult {
+	material: ExtractedMaterial;
+	/** 非空表示存在需要分块扫描抽取页图的 PDF，DO 应进入 scanning 阶段 */
+	scanRequired: ScanRequired[];
+}
+
+/** 规划阶段向 DO 发出的流程分叉信号（非失败，区别于 TaskError） */
+export class ScanRequiredSignal extends Error {
+	constructor(public readonly scans: ScanRequired[]) {
+		super('scanned PDF detected, chunked scan required');
+		this.name = 'ScanRequiredSignal';
 	}
 }
 
@@ -43,9 +92,10 @@ export async function readFromR2(opts: {
 	materials: MaterialItem[];
 	ai: Ai;
 	gatewayId: string;
-}): Promise<ExtractedMaterial> {
+}): Promise<ReadResult> {
 	const { bucket, materials, ai, gatewayId } = opts;
 	const material: ExtractedMaterial = { texts: [], images: [] };
+	const scanRequired: ScanRequired[] = [];
 
 	for (const [index, item] of materials.entries()) {
 		const object = await bucket.get(item.r2Key);
@@ -102,12 +152,20 @@ export async function readFromR2(opts: {
 			const isPdf = contentType === 'application/pdf';
 			if (result.format === 'markdown') {
 				const text = result.data.trim();
-				if (text) material.texts.push(text);
-				if (isPdf && text.replace(/\s+/g, '').length < SCANNED_PDF_THRESHOLD_CHARS) {
-					scanPdfIntoImages(buffer, material);
+				// 扫描件 PDF：toMarkdown 只产出模板壳（元数据+空页占位），交给 DO 分块扫描 OCR
+				// 判据：剥壳后正文极少（纯扫描件）；剥壳失败则回退用总字符数（原逻辑），都不报错
+				if (isPdf) {
+					const stripped = stripToMarkdownShell(text);
+					const strippedLen = stripped.replace(/\s+/g, '').length;
+					const totalLen = text.replace(/\s+/g, '').length;
+					if (strippedLen < SCANNED_PDF_STRIP_THRESHOLD_CHARS || totalLen < SCANNED_PDF_THRESHOLD_CHARS) {
+						scanRequired.push({ r2Key: item.r2Key, size: object.size });
+						continue;
+					}
 				}
+				if (text) material.texts.push(text);
 			} else if (isPdf) {
-				scanPdfIntoImages(buffer, material);
+				scanRequired.push({ r2Key: item.r2Key, size: object.size });
 			} else {
 				throw new TaskError(`第 ${index + 1} 个文件转换失败：${result.error}`);
 			}
@@ -119,19 +177,9 @@ export async function readFromR2(opts: {
 		);
 	}
 
-	if (material.texts.length === 0 && material.images.length === 0) {
+	if (material.texts.length === 0 && material.images.length === 0 && scanRequired.length === 0) {
 		throw new TaskError('所有文件都没有可处理的内容');
 	}
 
-	return material;
-}
-
-function scanPdfIntoImages(buffer: ArrayBuffer, material: ExtractedMaterial): void {
-	const budget = MAX_IMAGES - material.images.length;
-	if (budget <= 0) return;
-	const pages = extractPdfImages(new Uint8Array(buffer), budget);
-	for (const page of pages) {
-		material.images.push({ base64: uint8ToBase64(page), mimeType: 'image/jpeg' });
-	}
-	console.log(`Scanned PDF: extracted ${pages.length} page image(s) for OCR`);
+	return { material, scanRequired };
 }

@@ -282,7 +282,7 @@ app.post('/api/debug/extract', async (c) => {
 
 	const out: Record<string, unknown> = { mimeType, texts: [], imageCount: 0, ocrText: '' };
 	try {
-		const material = await readFromR2({
+		const { material, scanRequired } = await readFromR2({
 			bucket: env.R2_BUCKET,
 			materials: [{ r2Key, mimeType }],
 			ai: env.AI,
@@ -290,6 +290,10 @@ app.post('/api/debug/extract', async (c) => {
 		});
 		out.texts = material.texts;
 		out.imageCount = material.images.length;
+		if (scanRequired.length > 0) {
+			out.scanRequired = scanRequired;
+			out.ocrWarning = '扫描件 PDF 已识别：生产管线会走 DO 分块 OCR；本地调试建议改用图片文件测 OCR';
+		}
 		if (material.images.length > 0) {
 			if (!env.CF_AIG_TOKEN) {
 				out.ocrWarning = 'CF_AIG_TOKEN 未配置（.dev.vars），已跳过 OCR';
