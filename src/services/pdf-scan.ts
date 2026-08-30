@@ -29,6 +29,7 @@ const ENDSTREAM_KW = asciiBytes('endstream');
 const STREAM_SEARCH_WINDOW = 2048; // 标记之后多长范围内找 `stream` 关键字
 const DICT_LOOKBACK = 2048; // 标记之前多长范围内找 /Subtype /Image 与 /Length
 const LENGTH_RE = /\/Length\s+(\d+)/;
+const LENGTH_INDIRECT_RE = /\/Length\s+\d+\s+0\s+R\b/;
 const SUBTYPE_RE = /\/Subtype\s*\/Image/;
 
 /** 扫描会话状态（随 TaskState 持久化到 DO storage，跨 alarm 续扫） */
@@ -151,10 +152,10 @@ export async function runScanRound(opts: {
 			}
 			const dataStartAbs = base + dataStart;
 
-			// 流长度：优先字典里的 /Length；间接引用时退化为有界 endstream 查找
+			// 流长度：优先字典里的 /Length；间接引用（/Length N 0 R）时退化为有界 endstream 查找
 			const dictAscii = toAscii(buf, winFrom, streamIdx);
+			const lengthMatch = LENGTH_INDIRECT_RE.test(dictAscii) ? null : LENGTH_RE.exec(dictAscii);
 			let dataLen: number;
-			const lengthMatch = LENGTH_RE.exec(dictAscii);
 			if (lengthMatch) {
 				dataLen = parseInt(lengthMatch[1], 10);
 			} else {

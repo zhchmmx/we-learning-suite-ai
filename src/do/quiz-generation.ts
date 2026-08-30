@@ -169,6 +169,9 @@ export class QuizGenerationDO implements DurableObject {
 				}
 
 				// 扫描完成：累积语料 + 从 materials 移除被扫 PDF，回 pending 重新规划
+				if (!session.corpus.trim()) {
+					console.warn('[scan] session=' + task.ticket + ' 扫完 ' + session.pending.length + ' 个 PDF 但 0 抽取——疑似页图全被跳过');
+				}
 				const scannedKeys = new Set(session.pending.map((t) => t.r2Key));
 				task.materials = task.materials.filter((m) => !scannedKeys.has(m.r2Key));
 				task.preScannedCorpus = [task.preScannedCorpus, session.corpus].filter(Boolean).join('\n\n');

@@ -178,7 +178,7 @@ export async function readFromR2(opts: {
 	}
 
 	if (material.texts.length === 0 && material.images.length === 0 && scanRequired.length === 0) {
-		throw new TaskError('所有文件都没有可处理的内容');
+		throw new TaskError('所有文件都没有可处理的内容（若含扫描版 PDF，可能是页图识别/抽取失败）');
 	}
 
 	return { material, scanRequired };
