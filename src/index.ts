@@ -101,8 +101,8 @@ app.post('/api/quiz/generate', async (c) => {
  * 入参校验在 HTTP handler 里完成；实际 OCR 委托给 OCRProcessingDO(alarm 状态机)，
  * 绕过普通 HTTP invocation 的 CPU 上限。客户端通过 GET /api/ocr/status/:taskId 轮询结果。
  *
- * 用途：客户端上传前把扫描件 PDF 渲染图 / 图片文件转成文字，
- * 保证服务端只存文本、出题管线只吃文本。
+ * 用途：把扫描件 PDF 渲染图 / 图片文件转成文字，
+ * 供出题管线使用（出题阶段永远只吃文本）。
  */
 app.post('/api/ocr', async (c) => {
 	let body: { userId?: unknown; images?: Array<{ data?: unknown; mimeType?: unknown }> };

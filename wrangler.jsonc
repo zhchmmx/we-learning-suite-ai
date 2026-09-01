@@ -1,8 +1,8 @@
 /**
  * we-learning-suite-ai —— 出题 AI Worker
  *
- * 职责：接收 we-learning-suite-api 的服务端触发（ticket + 文档下载链接），
- * 异步完成「下载文档 → 格式分诊 → OCR（仅图片）→ AI Gateway 生成题目 → 校验 → 回写题库」。
+ * 职责：接收 we-learning-suite-api 的服务端触发（ticket + R2 key，直读 R2），
+ * 异步完成「读取材料 → 格式分诊 → toMarkdown / OCR → AI Gateway 生成题目 → 校验 → 回写题库」。
  * 客户端全程不知道本 Worker 的存在。
  *
  * For more details on how to configure Wrangler, refer to:
