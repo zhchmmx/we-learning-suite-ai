@@ -57,12 +57,27 @@ export async function patchSessionStatus(
 	await callApi(fetcher, `/api/quiz/sessions/${ticket}/status`, ticket, 'PATCH', reason ? { status, reason } : { status });
 }
 
+/** 细粒度生成进度（随 renew 上报，写 quiz_sessions.progress 列） */
+export interface ProgressPayload {
+	phase: 'planning' | 'scanning' | 'generating' | 'uploading';
+	/** generating / uploading：已生成题数 */
+	done?: number;
+	/** generating / uploading：计划总题数 */
+	total?: number;
+}
+
 /**
  * 续期 ticket：将 expires_at 往后推一个 TTL 周期。
  * 在长时生成任务中定期调用，防止上传时 ticket 已过期。
+ * 可选携带进度载荷——API 端容错解析，进度数据问题不影响续期本身。
  */
-export async function renewTicket(fetcher: Fetcher, ticket: string): Promise<void> {
-	await callApi(fetcher, `/api/quiz/sessions/${ticket}/renew`, ticket, 'POST');
+export async function renewTicket(
+	fetcher: Fetcher,
+	ticket: string,
+	progress?: ProgressPayload,
+): Promise<void> {
+	await callApi(fetcher, `/api/quiz/sessions/${ticket}/renew`, ticket, 'POST',
+		progress ? { progress } : undefined);
 }
 
 /**

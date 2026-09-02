@@ -18,6 +18,14 @@ export const OCR_IMAGES_PER_CALL = 5;
 /** 分批生成：每批生成的题目数上限 */
 export const GENERATION_BATCH_SIZE = 15;
 
+/**
+ * 终态任务的 DO storage 保留时长：
+ * - failed：保留断点现场（corpus、已生成批次）供断点续传，到期由 alarm 兜底清空
+ * - done：仅兜底清理（corpus 已在完成时立即释放）
+ */
+export const FAILED_TASK_RETENTION_MS = 48 * 60 * 60 * 1000;
+export const DONE_TASK_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 /** 模型调用 max_tokens：规划阶段（输出很小） */
 export const PLAN_MAX_TOKENS = 4_000;
 
