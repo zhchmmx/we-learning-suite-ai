@@ -10,13 +10,30 @@ export const MAX_TEXT_CHARS = 120_000;
 /** 出题数量 */
 export const DEFAULT_QUESTION_COUNT = 5;
 export const MIN_QUESTION_COUNT = 1;
-export const MAX_QUESTION_COUNT = 50;
+/** 每个文件（每次生成任务 / 每个 Quiz）的题目总数上限（用户拍板：400 题已稳定运行） */
+export const MAX_QUESTION_COUNT = 1000;
 
 /** 每次 OCR 请求最多携带的图片数 */
 export const OCR_IMAGES_PER_CALL = 5;
 
 /** 分批生成：每批生成的题目数上限 */
 export const GENERATION_BATCH_SIZE = 15;
+
+/**
+ * 上传分片：每次 HTTP 请求携带的题目数。
+ * ≤500 满足 API MAX_BATCH_SIZE；400 为生产已验证量级（每行 9 参数，3600/5000 D1 绑定参数上限留余量）。
+ * 题目总数 >500 时分片全部上传，严禁截断。
+ */
+export const UPLOAD_CHUNK_SIZE = 400;
+
+/** 同一阶段失败自动重试次数（LLM 抖动/网络/5xx），超过才置 failed。1000 题 ≈ 67 批，单批失败率会累积，必须自动重试 */
+export const PHASE_AUTO_RETRIES = 2;
+
+/** 计数驱动循环防死循环：连续 N 批 0 合格题目 → 判失败 */
+export const MAX_EMPTY_BATCH_STREAK = 3;
+
+/** allStems 滚动窗口：跨批去重用，同时控制 prompt 膨胀 */
+export const STEM_WINDOW = 150;
 
 /**
  * 终态任务的 DO storage 保留时长：

@@ -1,8 +1,18 @@
 import { runPlanningPhase, runBatchGenerationPhase, runUploadPhase } from '../pipeline';
 import { ApiClientError, patchSessionStatus, renewTicket, type ProgressPayload } from '../services/api-client';
 import { ContentScanError, scanQuestionBatch } from '../services/content-scan';
-import { DONE_TASK_RETENTION_MS, FAILED_TASK_RETENTION_MS, GENERATION_BATCH_SIZE, IMAGE_MIME_TYPES, MAX_IMAGES } from '../config';
-import { ScanRequiredSignal } from '../services/extract';
+import {
+	DONE_TASK_RETENTION_MS,
+	FAILED_TASK_RETENTION_MS,
+	GENERATION_BATCH_SIZE,
+	IMAGE_MIME_TYPES,
+	MAX_EMPTY_BATCH_STREAK,
+	MAX_IMAGES,
+	MAX_QUESTION_COUNT,
+	PHASE_AUTO_RETRIES,
+	STEM_WINDOW,
+} from '../config';
+import { ScanRequiredSignal, TaskError } from '../services/extract';
 import { ocrImages } from '../services/ocr';
 import { ocrModels } from '../services/models';
 import { createScanSession, runScanRound, type ScanSession } from '../services/pdf-scan';
@@ -37,6 +47,12 @@ interface TaskState {
 	scan: ScanSession | null;
 	/** 扫描完成累积的 OCR 语料（回 planning 时并入语料） */
 	preScannedCorpus: string;
+	/** 已成功上传的题数（片级断点；alarm 内自动重试续片用，resume 时因 API 已清库而重置 0） */
+	uploadedCount: number;
+	/** 阶段自动重试计数（成功推进时复位，用尽后置 failed） */
+	alarmRetries: number;
+	/** 连续空批计数（计数驱动循环的防死循环阀） */
+	emptyStreak: number;
 }
 
 /** 断点续传时校验源材料是否一致（r2Key 集合比对；mimeType 变化不影响已提取内容） */
@@ -44,6 +60,21 @@ function sameMaterials(a: MaterialItem[], b: MaterialItem[]): boolean {
 	if (a.length !== b.length) return false;
 	const keys = new Set(a.map((m) => m.r2Key));
 	return b.every((m) => keys.has(m.r2Key));
+}
+
+/**
+ * 错误是否值得自动重试：
+ * - API 4xx（取消信号 / 业务校验失败）确定性错误 → 不重试
+ * - API 5xx（服务暂不可用）→ 可重试
+ * - 内容审核：仅 CONTENT_SCAN_UNAVAILABLE（服务不可用）暂态可重试；block / review 未决永久
+ * - TaskError（材料超限 / 连续空批等语义性失败）→ 不重试
+ * - 其余（LLM 输出异常 / 网络错误等）→ 默认可重试
+ */
+function isRetriable(err: unknown): boolean {
+	if (err instanceof ApiClientError) return err.status >= 500;
+	if (err instanceof ContentScanError) return err.reasonCode === 'CONTENT_SCAN_UNAVAILABLE';
+	if (err instanceof TaskError) return false;
+	return true;
 }
 
 /**
@@ -86,6 +117,15 @@ export class QuizGenerationDO implements DurableObject {
 				existing.phase = existing.failedPhase === 'planning' ? 'pending' : existing.failedPhase;
 				existing.failedPhase = null;
 				existing.batchScanRetried = false; // 恢复的批次重新享有一次审核重试
+				// 上传断点重置：API 复活路径已 DELETE questions（DB 为空），必须从第 0 片重传
+				existing.uploadedCount = 0;
+				// 版本漂移防护：改过 MAX_QUESTION_COUNT 后，存量任务的 plan 仍是旧值
+				if (existing.plan) {
+					existing.plan.totalCount = Math.min(existing.plan.totalCount, MAX_QUESTION_COUNT);
+					existing.totalBatches = Math.ceil(existing.plan.totalCount / GENERATION_BATCH_SIZE);
+				}
+				existing.alarmRetries = 0;
+				existing.emptyStreak = 0;
 				await this.state.storage.put('task', existing);
 				// setAlarm 是替换语义：覆盖掉 failed 时挂的清理 alarm，立即续跑
 				await this.scheduleAlarm();
@@ -113,6 +153,9 @@ export class QuizGenerationDO implements DurableObject {
 			batchScanRetried: false,
 			scan: null,
 			preScannedCorpus: '',
+			uploadedCount: 0,
+			alarmRetries: 0,
+			emptyStreak: 0,
 		};
 
 		await this.state.storage.put('task', task);
@@ -183,6 +226,7 @@ export class QuizGenerationDO implements DurableObject {
 				task.totalBatches = Math.ceil(plan.totalCount / GENERATION_BATCH_SIZE);
 				task.batchIndex = 1;
 				task.phase = 'generating';
+				task.alarmRetries = 0; // 规划成功，复位阶段重试计数
 
 				await this.state.storage.put('task', task);
 				await this.state.storage.put('corpus', corpus);
@@ -208,6 +252,7 @@ export class QuizGenerationDO implements DurableObject {
 						}),
 				});
 				task.scan = session;
+				task.alarmRetries = 0; // 本轮扫描成功，复位阶段重试计数
 				await this.state.storage.put('task', task);
 
 				if (!done) {
@@ -227,7 +272,7 @@ export class QuizGenerationDO implements DurableObject {
 				await this.state.storage.put('task', task);
 				await this.scheduleAlarm();
 			} else if (task.phase === 'generating') {
-				// ── 分批生成：每轮 alarm 只跑一批 ──
+				// ── 分批生成：每轮 alarm 只跑一批（计数驱动，达标即进入上传）──
 				// 取消检测检查点：session 已被取消时 renewTicket 返回 4xx，在此中止。
 				// 顺带上报批进度（done = 已持久化的前 N-1 批题数）
 				if (!task.plan) {
@@ -239,12 +284,20 @@ export class QuizGenerationDO implements DurableObject {
 					total: task.plan.totalCount,
 				});
 
-				const corpus = await this.state.storage.get<string>('corpus');
-				if (!corpus || !task.plan) {
-					throw new Error('Missing corpus or plan in storage');
+				// 已达计划总数 → 直接进入上传（无需再跑一轮空 alarm）
+				const remaining = task.plan.totalCount - task.allQuestions.length;
+				if (remaining <= 0) {
+					task.phase = 'uploading';
+					await this.state.storage.put('task', task);
+					await this.scheduleAlarm();
+					return;
 				}
 
-				const remaining = task.plan.totalCount - task.allQuestions.length;
+				const corpus = await this.state.storage.get<string>('corpus');
+				if (!corpus) {
+					throw new Error('Missing corpus in storage');
+				}
+
 				const batchSize = Math.min(GENERATION_BATCH_SIZE, remaining);
 
 				const { questions, stems } = await runBatchGenerationPhase(
@@ -274,18 +327,36 @@ export class QuizGenerationDO implements DurableObject {
 					throw err;
 				}
 
+				// 上限执法（不是迁就上传限制）：只收计划总数以内的题目。
+				// 丢弃的仅有模型超发到计划总数之外的多余生成——所有收录题目仍会全部上传。
+				const accepted = questions.slice(0, remaining);
+				if (accepted.length === 0) {
+					// 计数驱动循环的防死循环阀：连续多批 0 合格题目 → 判失败
+					task.emptyStreak++;
+					if (task.emptyStreak >= MAX_EMPTY_BATCH_STREAK) {
+						throw new TaskError(`连续 ${MAX_EMPTY_BATCH_STREAK} 批没有合格题目（JSON 解析失败或全部未通过校验）`);
+					}
+					await this.state.storage.put('task', task);
+					await this.scheduleAlarm();
+					return;
+				}
+				task.emptyStreak = 0;
+
 				task.batchScanRetried = false; // 本批通过审核，复位供下一批使用
-				task.allQuestions.push(...questions);
-				task.allStems = stems;
+				task.allQuestions.push(...accepted);
+				// 累积去重窗口（此前是覆盖写，只跟上一批去重；题量大时跨批重复风险高）
+				task.allStems = [...task.allStems, ...stems].slice(-STEM_WINDOW);
 				task.batchIndex++;
+				task.alarmRetries = 0; // 本批成功，复位阶段重试计数
 
 				console.log(
-					`Batch ${task.batchIndex - 1}/${task.totalBatches}: ${questions.length} valid (total: ${task.allQuestions.length})`,
+					`Batch ${task.batchIndex - 1}/${task.totalBatches}: ${accepted.length} valid (total: ${task.allQuestions.length}/${task.plan.totalCount})`,
 				);
 
 				await this.state.storage.put('task', task);
 
-				if (task.batchIndex <= task.totalBatches) {
+				// 循环条件：计数驱动（不依赖 batchIndex 是否走完，以实际题数为准）
+				if (task.allQuestions.length < task.plan.totalCount) {
 					await this.scheduleAlarm();
 				} else {
 					// 全部批次完成 → 进入上传阶段
@@ -294,7 +365,7 @@ export class QuizGenerationDO implements DurableObject {
 					await this.scheduleAlarm();
 				}
 			} else if (task.phase === 'uploading') {
-				// ── 上传：入库（API 自动把 session 置为 completed）──
+				// ── 上传：分片入库（片级断点，全部题目完整上传，严禁截断）──
 				// 上传前续期 + 上报最终进度（原本 uploading 无 renew，此处顺带补上取消检测）
 				if (!task.plan) {
 					throw new Error('Missing plan in task state');
@@ -304,7 +375,22 @@ export class QuizGenerationDO implements DurableObject {
 					done: task.allQuestions.length,
 					total: task.plan.totalCount,
 				});
-				await runUploadPhase(this.env, task.ticket, task.allQuestions);
+
+				// 断点已覆盖全部题目（末片已成功、但收尾落盘前中断）：直接收尾，
+				// 否则空循环不再发片，session 会永远停在 processing（末片的 completed 由 API 端已写入）
+				if (task.allQuestions.length > 0 && task.uploadedCount >= task.allQuestions.length) {
+					console.warn(`Session ${task.ticket}: upload checkpoint already complete (${task.uploadedCount}), finalizing`);
+				} else {
+					// 自动重试时重入本分支，从 uploadedCount 断点续传，已成功的片不会重发；
+					// API 端确定性 id + INSERT OR IGNORE 保证任何片重发都不会产生重复行
+					// ?? 0：兼容旧格式任务（无 uploadedCount 字段），避免 offset 变 NaN 退回非幂等路径
+					await runUploadPhase(this.env, task.ticket, task.allQuestions, task.uploadedCount ?? 0,
+						async (uploadedCount) => {
+							task.uploadedCount = uploadedCount;
+							task.alarmRetries = 0; // 片成功，复位阶段重试计数
+							await this.state.storage.put('task', task);
+						});
+				}
 				console.log(`Uploaded ${task.allQuestions.length} questions for session ${task.ticket}`);
 
 				task.phase = 'done';
@@ -338,14 +424,25 @@ export class QuizGenerationDO implements DurableObject {
 
 	/**
 	 * 任务级错误处理：
-	 * - 4xx（取消 / ticket 失效）→ 直接标记 failed，不重试
-	 * - 其他错误 → 尽力标记 failed
+	 * - 可重试错误（LLM 抖动 / 网络 / 5xx / 暂态审核不可用）且未用完次数 → 原地重跑当前阶段
+	 * - 4xx（取消 / ticket 失效）或用尽重试 → 标记 failed
 	 * failed 后保留断点现场（corpus、已生成批次、扫描会话）供同 ticket 重试续传，
 	 * 保留期到点由 alarm 兜底清空，storage 不再永久残留。
 	 */
 	private async handleTaskError(task: TaskState, err: unknown): Promise<void> {
-		// 取消信号：renewTicket / patchSessionStatus 收到 4xx
-		if (err instanceof ApiClientError && err.status < 500) {
+		// 阶段自动重试：1000 题 ≈ 67 批，单批失败率会累积（p=1% → 裸成功率仅 51%），
+		// 必须在任务级失败前消化掉暂态抖动，而不是让用户手动重试
+		const retries = task.alarmRetries ?? 0;
+		if (retries < PHASE_AUTO_RETRIES && isRetriable(err)) {
+			task.alarmRetries = retries + 1;
+			await this.state.storage.put('task', task);
+			await this.scheduleAlarm();
+			console.warn(`Phase ${task.phase} retry ${task.alarmRetries}/${PHASE_AUTO_RETRIES} for session ${task.ticket}:`, err);
+			return; // 不置 failed、不动 session
+		}
+
+		// 取消信号：renewTicket / patchSessionStatus 收到 4xx（upload 的 4xx 是业务故障，不算取消）
+		if (err instanceof ApiClientError && err.status < 500 && err.origin !== 'upload') {
 			console.warn(`Session ${task.ticket} cancelled or ticket invalid:`, err.message);
 		} else {
 			console.error(`Task failed for session ${task.ticket}:`, err);

@@ -1,4 +1,4 @@
-import { GENERATION_MAX_TOKENS, MAX_TEXT_CHARS, PLAN_MAX_TOKENS } from './config';
+import { GENERATION_MAX_TOKENS, MAX_QUESTION_COUNT, MAX_TEXT_CHARS, PLAN_MAX_TOKENS, UPLOAD_CHUNK_SIZE } from './config';
 import { uploadQuestions } from './services/api-client';
 import { scanCorpus } from './services/content-scan';
 import { readFromR2, ScanRequiredSignal, TaskError } from './services/extract';
@@ -88,16 +88,43 @@ export async function runPlanningPhase(
 	console.log('Plan generated');
 
 	const planParsed = parseModelJson(planRaw) as Record<string, unknown> | null;
-	const plan: GenerationPlan = {
-		totalCount: typeof planParsed?.totalCount === 'number' ? planParsed.totalCount : 0,
-		types: Array.isArray(planParsed?.types) ? (planParsed.types as string[]).filter((t) => typeof t === 'string') : [],
-	};
-	if (plan.totalCount < 1 || plan.types.length === 0) {
+	// 容错归一：模型可能输出 "1,024" / "200题" / 200.0 等非标准数字
+	const rawTotal = parseTotalCount(planParsed?.totalCount);
+	const types = Array.isArray(planParsed?.types)
+		? (planParsed.types as string[]).filter((t) => typeof t === 'string')
+		: [];
+	if (rawTotal < 1 || types.length === 0) {
 		throw new TaskError('规划阶段输出异常（totalCount 或 types 无效）');
 	}
-	console.log(`Plan: ${plan.totalCount} questions, types=[${plan.types.join(', ')}]`);
+	// 每文件出题上限（提示词已同步约束，此处为服务端强制兜底）
+	const totalCount = Math.min(rawTotal, MAX_QUESTION_COUNT);
+	if (totalCount < rawTotal) {
+		console.warn(`Plan totalCount clamped: ${rawTotal} → ${totalCount} (MAX_QUESTION_COUNT)`);
+	}
+	const plan: GenerationPlan = {
+		totalCount,
+		// 材料实际题量估计（未 clamp），超限时可供客户端提示"材料约 N 题，本次生成上限 M 题"
+		estimatedTotal: rawTotal,
+		types,
+	};
+	console.log(`Plan: ${plan.totalCount} questions (material estimate: ${plan.estimatedTotal}), types=[${plan.types.join(', ')}]`);
 
 	return { plan, corpus };
+}
+
+/**
+ * 规划 totalCount 容错解析：接受 number / "1,024" / "200题" 等形态，归一为正整数。
+ * 无法解析返回 0（由调用方判无效）。
+ */
+function parseTotalCount(v: unknown): number {
+	if (typeof v === 'number' && Number.isFinite(v)) {
+		return Math.floor(v);
+	}
+	if (typeof v === 'string') {
+		const n = parseInt(v.replace(/[,，\s题道]/g, ''), 10);
+		return Number.isFinite(n) ? n : 0;
+	}
+	return 0;
 }
 
 /**
@@ -141,15 +168,34 @@ export async function runBatchGenerationPhase(
 }
 
 /**
- * 上传阶段：把全部题目入库。成功后 API 自动把 session 置为 completed。
+ * 上传阶段：把全部题目分片入库（所有题目必须完整上传，严禁截断）。
+ * - 题目总数 > 单请求上限（API MAX_BATCH_SIZE=500）时自动分片，每片 UPLOAD_CHUNK_SIZE 题
+ * - startOffset：断点续传起点（已成功上传的题数），自动重试时从断点续，不重发已传片
+ * - onChunkUploaded：每片成功后的回调（DO 用于把 uploadedCount 断点落盘）
+ * 仅最后一片会把 session 置为 completed（API 端 final 语义）。
  */
 export async function runUploadPhase(
 	env: Env,
 	ticket: string,
 	questions: GeneratedQuestion[],
+	startOffset: number,
+	onChunkUploaded?: (uploadedCount: number) => Promise<void>,
 ): Promise<void> {
 	if (questions.length === 0) {
 		throw new TaskError('所有批次中没有合格题目（JSON 解析失败或全部未通过校验）');
 	}
-	await uploadQuestions(env.API_WORKER, ticket, questions);
+	if (startOffset < 0 || startOffset > questions.length) {
+		throw new TaskError(`Invalid upload checkpoint: ${startOffset}/${questions.length}`);
+	}
+
+	const pending = questions.slice(startOffset);
+	for (let i = 0; i < pending.length; i += UPLOAD_CHUNK_SIZE) {
+		const chunk = pending.slice(i, i + UPLOAD_CHUNK_SIZE);
+		const offset = startOffset + i;
+		const final = i + UPLOAD_CHUNK_SIZE >= pending.length;
+		await uploadQuestions(env.API_WORKER, ticket, chunk, offset, final);
+		if (onChunkUploaded) {
+			await onChunkUploaded(startOffset + i + chunk.length);
+		}
+	}
 }

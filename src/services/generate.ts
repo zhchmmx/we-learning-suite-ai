@@ -1,4 +1,5 @@
 import type { GeneratedQuestion } from '../types';
+import { MAX_QUESTION_COUNT } from '../config';
 
 /**
  * 出题：提示词构建 + 模型输出解析与校验。
@@ -19,6 +20,8 @@ import type { GeneratedQuestion } from '../types';
 
 export interface GenerationPlan {
 	totalCount: number;
+	/** 材料实际题量估计（未 clamp）——超过上限时供客户端提示，如"材料约 600 题，本次生成 1000 题" */
+	estimatedTotal?: number;
 	types: string[];
 }
 
@@ -30,14 +33,19 @@ B）材料是知识性文本（课文、笔记、讲义等，没有现成题目�
 
 输出要求（必须严格遵守）：
 1. 只输出一个 JSON 对象，不要输出任何解释、前言或 markdown 代码块标记。
-2. 结构为 { "totalCount": 数字, "types": ["题型1", "题型2", ...] }。
+2. 结构为 { "totalCount": 数字, "estimatedTotal": 数字, "types": ["题型1", "题型2", ...] }。
 3. totalCount：
-   - 情况 A（材料含题目）：与材料中实际题目数量一致，不要多也不要少。
-   - 情况 B（材料为知识文本）：根据内容量和知识点密度自行判断，确保覆盖主要知识点。
+   - 情况 A（材料含题目）：与材料中实际题目数量一致，不要多也不要少；
+     但 totalCount 绝对不得超过 ${MAX_QUESTION_COUNT}——材料题数超过时，按材料顺序选取
+     覆盖最完整的 ${MAX_QUESTION_COUNT} 道，并把材料中统计到的实际题目总数写入 estimatedTotal。
+   - 情况 B（材料为知识文本）：根据内容量和知识点密度自行判断，确保覆盖主要知识点，
+     同样不得超过 ${MAX_QUESTION_COUNT}。
 4. types：从材料中题目的实际类型选取（情况 A），或根据材料特点选择最合适的 2~4 种题型（情况 B）。
    可选项："single_answer"（单选）、"multiple_answer"（多选）、"true_false"（判断）、
    "fill_blank"（填空）、"short_answer"（简答）。
-5. ⚠️ 你的判断和思考过程应贴合材料的语言；若输出中包含任何自然语言说明（本提示词已禁止，但作为兜底规则），其语言必须与材料语言一致。JSON 结构字段（totalCount、types）和题型枚举值必须保持英文小写，不得翻译。`;
+5. totalCount 与 estimatedTotal 必须是纯整数：不加引号、不带单位（"题"/"道"）、不写千分位分隔符。
+   ${MAX_QUESTION_COUNT} 是绝对硬上限，与任何其他规则冲突时以它为准。
+6. ⚠️ 你的判断和思考过程应贴合材料的语言；若输出中包含任何自然语言说明（本提示词已禁止，但作为兜底规则），其语言必须与材料语言一致。JSON 结构字段（totalCount、estimatedTotal、types）和题型枚举值必须保持英文小写，不得翻译。`;
 
 export function buildPlanUserPrompt(materialText: string): string {
 	return `请分析以下学习材料，判断其性质并制定出题计划：

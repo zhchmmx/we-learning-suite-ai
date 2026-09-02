@@ -320,7 +320,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 		pendingAlarm: number | null;
 	};
 
-	/** 内存版 DurableObjectState：get/put/delete/setAlarm 全部落到 Map 上 */
+	/** 内存版 DurableObjectState：get/put/delete/deleteAll/setAlarm 全部落到 Map 上 */
 	function makeMockDOState(): { state: DurableObjectState; mock: MockDOStateData } {
 		const mock: MockDOStateData = { data: new Map(), pendingAlarm: null };
 		const storage = {
@@ -331,22 +331,32 @@ describe("QuizGenerationDO alarm state machine", () => {
 			delete: async (key: string) => {
 				mock.data.delete(key);
 			},
+			deleteAll: async () => {
+				mock.data.clear();
+			},
 			setAlarm: async (time: number) => {
 				mock.pendingAlarm = time;
+			},
+			deleteAlarm: async () => {
+				mock.pendingAlarm = null;
 			},
 			getAlarm: async () => mock.pendingAlarm,
 		};
 		return { state: { storage } as unknown as DurableObjectState, mock };
 	}
 
-	/** 逐轮执行 alarm 处理器，直到没有已调度的 alarm 为止 */
+	/** 逐轮执行 alarm 处理器，直到没有已到期的 alarm 为止 */
 	async function runUntilIdle(instance: QuizGenerationDO, mock: MockDOStateData): Promise<void> {
 		let guard = 0;
-		while (mock.pendingAlarm !== null && guard++ < 20) {
+		// 只消费"到期"的 alarm；done/failed 挂的保留期清理 alarm（未来时间）不在此触发
+		while (mock.pendingAlarm !== null && mock.pendingAlarm <= Date.now() && guard++ < 20) {
 			mock.pendingAlarm = null;
 			await instance.alarm();
 		}
-		expect(mock.pendingAlarm).toBeNull();
+		// 若仍有已调度的 alarm，必须是未来的终态清理 alarm
+		if (mock.pendingAlarm !== null) {
+			expect(mock.pendingAlarm).toBeGreaterThan(Date.now());
+		}
 	}
 
 	/** 创建 DO 实例并投递任务（等价于队列消费者调用 stub.fetch） */
@@ -371,7 +381,7 @@ describe("QuizGenerationDO alarm state machine", () => {
 	it("text channel: plan -> generate -> validate -> upload, phase ends done", async () => {
 		const calls: string[] = [];
 		// 用对象属性捕获上传内容：局部 let 在闭包中赋值会被 TS 控制流收窄为 null
-		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
+		const captured: { uploadedBody?: { questions?: unknown[]; offset?: number; final?: boolean } } = {};
 		let llmCallCount = 0;
 
 		// 把测试材料写入 R2 模拟桶
@@ -417,9 +427,13 @@ describe("QuizGenerationDO alarm state machine", () => {
 		]);
 		await runUntilIdle(instance, mock);
 
-		// planning(llm) → 续期 → 续期 → generating(llm) → uploading(batch)
-		expect(calls).toEqual(["llm", "renew", "renew", "llm", "batch"]);
+		// planning 前 renew(进度上报) → llm(plan) → planning 后 renew(generating 0/N)
+		// → 每批前 renew(generating done/N) → llm(generate) → 上传前 renew(uploading) → batch
+		expect(calls).toEqual(["renew", "llm", "renew", "renew", "llm", "renew", "batch"]);
 		expect(captured.uploadedBody?.questions).toHaveLength(2);
+		// 分片上传契约：单片任务 offset=0 且 final=true（API 仅在 final 片置 completed）
+		expect(captured.uploadedBody?.offset).toBe(0);
+		expect(captured.uploadedBody?.final).toBe(true);
 		// 终态检查：任务完成、语料已释放
 		expect((mock.data.get("task") as { phase: string }).phase).toBe("done");
 		expect(mock.data.has("corpus")).toBe(false);
@@ -500,8 +514,9 @@ describe("QuizGenerationDO alarm state machine", () => {
 		]);
 		await runUntilIdle(instance, mock);
 
-		// planning(llm) → 续期被 403 拒绝（取消信号）→ 中止 → 标记 failed，不再生成也不再上传
-		expect(calls).toEqual(["llm", "renew-rejected", "patch-failed"]);
+		// planning 前的 renew 即被 403 拒绝（取消信号）→ 中止 → 标记 failed，不再生成也不再上传。
+		// renew 现在发生在 planning 之前（搭车进度上报），所以 llm 根本不会被调用
+		expect(calls).toEqual(["renew-rejected", "patch-failed"]);
 		expect((mock.data.get("task") as { phase: string }).phase).toBe("failed");
 	});
 
