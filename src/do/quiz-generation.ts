@@ -435,9 +435,17 @@ export class QuizGenerationDO implements DurableObject {
 		const retries = task.alarmRetries ?? 0;
 		if (retries < PHASE_AUTO_RETRIES && isRetriable(err)) {
 			task.alarmRetries = retries + 1;
+			// planning 是 pending 分支内的瞬态阶段（仅为上报进度而落盘），alarm 状态机里没有 planning 分支。
+			// 不复位成 pending，重入的 alarm 会匹配不到任何分支：不执行任何阶段、也不再调度下一轮，
+			// 任务就此静默卡死——session 永远停在 processing，既不 done 也不 failed，还不打任何错误日志。
+			// 与 resume 分支（fetch）里 failedPhase === 'planning' → 'pending' 的映射保持一致。
+			const retriedPhase = task.phase;
+			if (task.phase === 'planning') {
+				task.phase = 'pending';
+			}
 			await this.state.storage.put('task', task);
 			await this.scheduleAlarm();
-			console.warn(`Phase ${task.phase} retry ${task.alarmRetries}/${PHASE_AUTO_RETRIES} for session ${task.ticket}:`, err);
+			console.warn(`Phase ${retriedPhase} retry ${task.alarmRetries}/${PHASE_AUTO_RETRIES} for session ${task.ticket}:`, err);
 			return; // 不置 failed、不动 session
 		}
 
