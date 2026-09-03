@@ -21,10 +21,11 @@ export const GENERATION_BATCH_SIZE = 15;
 
 /**
  * 上传分片：每次 HTTP 请求携带的题目数。
- * ≤500 满足 API MAX_BATCH_SIZE；400 为生产已验证量级（每行 9 参数，3600/5000 D1 绑定参数上限留余量）。
- * 题目总数 >500 时分片全部上传，严禁截断。
+ * ≤500 满足 API MAX_BATCH_SIZE。题目本体在 DO 里按批分键（q_<batchIndex>），
+ * 上传时流式攒片发送；100 题/片让 uploadedCount 断点粒度更细，失败重传代价更小。
+ * 题目总数 >100 时分片全部上传，严禁截断。
  */
-export const UPLOAD_CHUNK_SIZE = 400;
+export const UPLOAD_CHUNK_SIZE = 100;
 
 /** 同一阶段失败自动重试次数（LLM 抖动/网络/5xx），超过才置 failed。1000 题 ≈ 67 批，单批失败率会累积，必须自动重试 */
 export const PHASE_AUTO_RETRIES = 2;

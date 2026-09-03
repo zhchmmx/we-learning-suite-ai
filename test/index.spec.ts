@@ -71,6 +71,29 @@ const VALID_QUESTIONS_JSON = JSON.stringify({
 	],
 });
 
+/** 仅提供 gateway().getUrl() 的 AI mock：USE_DIRECT_MODELS=true 时模型调用走全局 fetch（可被 stub 拦截） */
+const GATEWAY_ONLY_AI = {
+	gateway: () => ({ getUrl: async () => "https://gateway.test/" }),
+} as unknown as Ai;
+
+/** toMarkdown 确定性抛错的 AI mock：覆盖真实 AI binding（未配 remote proxy 时 toMarkdown 耗时不定，会挂起测试） */
+const FAILING_TO_MARKDOWN_AI = {
+	toMarkdown: async () => {
+		throw new Error("mock: conversion failed");
+	},
+	gateway: () => ({ getUrl: async () => "https://gateway.test/" }),
+} as unknown as Ai;
+
+/** 构造 n 道判断题的模型输出（多批生成 / 分片上传用例） */
+function makeQuestionsJson(n: number): string {
+	const questions = Array.from({ length: n }, (_, i) => ({
+		type: "true_false",
+		content: { stem: `第${i + 1}题：陈述正确` },
+		answer: { correct: true },
+	}));
+	return JSON.stringify({ questions });
+}
+
 beforeEach(() => {
 	// 默认拒绝一切未配置的外呼，避免测试误触真实网络
 	stubFetch((url) => new Response(`unexpected fetch: ${url}`, { status: 599 }));
@@ -382,6 +405,8 @@ describe("QuizGenerationDO alarm state machine", () => {
 	type MockDOStateData = {
 		data: Map<string, unknown>;
 		pendingAlarm: number | null;
+		/** 测试钩子：置 true 后 put('task', {phase:'failed'}) 抛错，模拟终态落盘失败（尾部加固用例） */
+		failPutFailedTask?: boolean;
 	};
 
 	/** 内存版 DurableObjectState：get/put/delete/deleteAll/setAlarm 全部落到 Map 上 */
@@ -390,6 +415,9 @@ describe("QuizGenerationDO alarm state machine", () => {
 		const storage = {
 			get: async (key: string) => mock.data.get(key),
 			put: async (key: string, value: unknown) => {
+				if (mock.failPutFailedTask && key === "task" && (value as { phase?: string } | null)?.phase === "failed") {
+					throw new Error("mock: persist failed state rejected");
+				}
 				mock.data.set(key, value);
 			},
 			delete: async (key: string) => {
@@ -485,7 +513,15 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
+		// USE_DIRECT_MODELS=true + CF_AIG_TOKEN + gateway-only AI：模型调用走全局 fetch（stub 可拦截）。
+		// 不覆盖则继承 wrangler.jsonc 的 dynamic 路由，缺 CF_AIG_TOKEN 直接失败
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			USE_DIRECT_MODELS: "true",
+			CF_AIG_TOKEN: "test-token",
+			AI: GATEWAY_ONLY_AI,
+		});
 		const { instance, mock } = await startTask(customEnv, "t-do-1", [
 			{ r2Key: "material.txt", mimeType: "text/plain" },
 		]);
@@ -528,7 +564,12 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected API call: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key", R2_BUCKET: mockR2 });
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			R2_BUCKET: mockR2,
+			AI: FAILING_TO_MARKDOWN_AI,
+		});
 		const { instance, mock } = await startTask(customEnv, "t-do-2", [
 			{ r2Key: "doc.pdf", mimeType: "application/pdf" },
 		]);
@@ -607,7 +648,13 @@ describe("QuizGenerationDO alarm state machine", () => {
 			return new Response(`unexpected fetch: ${url}`, { status: 599 });
 		});
 
-		const customEnv = makeEnv({ API_WORKER: apiWorker, AI_PROVIDER_KEY_MAIN: "test-key" });
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			USE_DIRECT_MODELS: "true",
+			CF_AIG_TOKEN: "test-token",
+			AI: GATEWAY_ONLY_AI,
+		});
 		const materials = [{ r2Key: "material-dup.txt", mimeType: "text/plain" }];
 		const { instance, mock } = await startTask(customEnv, "t-do-4", materials);
 		await runUntilIdle(instance, mock);
@@ -629,6 +676,8 @@ describe("QuizGenerationDO alarm state machine", () => {
 	it("scanned PDF: DO runs chunked scan, resumes planning with OCR corpus, completes", async () => {
 		const calls: string[] = [];
 		const captured: { uploadedBody?: { questions?: unknown[] } } = {};
+		// 捕获每次模型调用的请求体，验证 OCR 语料确实进入了生成提示词
+		const llmBodies: string[] = [];
 
 		// mock AI：toMarkdown 返回空白 → 触发扫描件信号
 		const mockAi = {
@@ -678,9 +727,10 @@ describe("QuizGenerationDO alarm state machine", () => {
 			},
 		]);
 		let llmCalls = 0;
-		stubFetch(async (url) => {
+		stubFetch(async (url, init) => {
 			if (url.includes("/chat/completions")) {
 				calls.push("llm");
+				llmBodies.push(String(init?.body));
 				llmCalls++;
 				const content = llmCalls === 1 ? "扫描件OCR文本" : llmCalls === 2 ? PLAN_JSON : VALID_QUESTIONS_JSON;
 				return sseResponse(content);
@@ -716,12 +766,128 @@ describe("QuizGenerationDO alarm state machine", () => {
 		]);
 		await runUntilIdle(instance, mock);
 
-		// 扫描发生：OCR 文本累积进 preScannedCorpus，再并入语料完成生成
+		// 扫描发生：OCR 文本并入语料（corpus 键）并出现在生成提示词里（第 3 次模型调用 = generate）。
+		// 规划成功后 task.preScannedCorpus 已清空（语料只在 corpus 键存一份，task 体积与语料解耦）
 		const task = mock.data.get("task") as { phase: string; preScannedCorpus: string };
 		expect(task.phase).toBe("done");
-		expect(task.preScannedCorpus).toContain("扫描件OCR文本");
+		expect(task.preScannedCorpus).toBe("");
+		expect(llmBodies[2]).toContain("扫描件OCR文本");
 		expect(captured.uploadedBody?.questions).toHaveLength(2);
 		expect(llmCalls).toBe(3); // OCR + plan + generate
+	});
+
+	it("multi-batch: questions stored in q_* keys, uploaded in 100-question chunks", async () => {
+		const uploadedChunks: Array<{ questions: unknown[]; offset: number; final: boolean }> = [];
+
+		await env.R2_BUCKET.put("material-multi.txt", "多批生成测试材料，内容足以规划出较多题目。", {
+			httpMetadata: { contentType: "text/plain" },
+		});
+
+		// 105 题 = 7 批 × 15 题（GENERATION_BATCH_SIZE），上传时按 UPLOAD_CHUNK_SIZE=100 切成两片
+		const PLAN_JSON = JSON.stringify({ totalCount: 105, types: ["true_false"] });
+		let llmCallCount = 0;
+		stubFetch(async (url) => {
+			if (url.includes("/chat/completions")) {
+				llmCallCount++;
+				const content = llmCallCount === 1 ? PLAN_JSON : makeQuestionsJson(15);
+				return sseResponse(content);
+			}
+			return new Response(`unexpected fetch: ${url}`, { status: 599 });
+		});
+
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.endsWith("/renew")) return jsonResponse({ data: { ok: true } });
+			if (url.endsWith("/status")) return jsonResponse({ data: {} });
+			if (url.includes("/questions/batch")) {
+				const body = JSON.parse(String(init?.body)) as { questions: unknown[]; offset: number; final: boolean };
+				uploadedChunks.push(body);
+				return jsonResponse({ data: { inserted: body.questions.length } }, 201);
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			USE_DIRECT_MODELS: "true",
+			CF_AIG_TOKEN: "test-token",
+			AI: GATEWAY_ONLY_AI,
+		});
+		const { instance, mock } = await startTask(customEnv, "t-multi-1", [
+			{ r2Key: "material-multi.txt", mimeType: "text/plain" },
+		]);
+		await runUntilIdle(instance, mock);
+
+		// 终态 + 计数：task 只留计数器，题目本体在 q_* 分键
+		const task = mock.data.get("task") as {
+			phase: string;
+			acceptedCount: number;
+			questionBatches: number;
+			allQuestions?: unknown[];
+		};
+		expect(task.phase).toBe("done");
+		expect(task.acceptedCount).toBe(105);
+		expect(task.questionBatches).toBe(7);
+		expect(task.allQuestions).toBeUndefined(); // task 不再内嵌题目数组
+		for (let b = 1; b <= 7; b++) {
+			expect((mock.data.get(`q_${b}`) as unknown[]).length).toBe(15);
+		}
+
+		// 105 题 = 100 题整片（final=false）+ 5 题末片（final=true），offset 为全局题序
+		expect(uploadedChunks).toHaveLength(2);
+		expect(uploadedChunks[0].questions).toHaveLength(100);
+		expect(uploadedChunks[0].offset).toBe(0);
+		expect(uploadedChunks[0].final).toBe(false);
+		expect(uploadedChunks[1].questions).toHaveLength(5);
+		expect(uploadedChunks[1].offset).toBe(100);
+		expect(uploadedChunks[1].final).toBe(true);
+	});
+
+	it("tail hardening: storage failure while persisting failed state never escapes alarm()", async () => {
+		const patches: Array<{ status: string }> = [];
+
+		// mock R2 返回不支持的格式，规划阶段抛 TaskError（不可重试，直落 failed 收敛路径）
+		const mockR2 = {
+			async get(_key: string) {
+				return {
+					text: async () => "fake-content",
+					arrayBuffer: async () => new ArrayBuffer(0),
+					httpMetadata: { contentType: "application/pdf" } as Record<string, string>,
+				};
+			},
+		} as unknown as R2Bucket;
+
+		const apiWorker = makeApiWorker(async (url, init) => {
+			if (url.includes("/sessions/") && url.endsWith("/status")) {
+				patches.push(JSON.parse(String(init?.body)) as { status: string });
+				return jsonResponse({ data: {} });
+			}
+			if (url.includes("/sessions/") && url.endsWith("/renew")) {
+				return jsonResponse({ data: { ok: true } });
+			}
+			return new Response(`unexpected API call: ${url}`, { status: 599 });
+		});
+
+		const customEnv = makeEnv({
+			API_WORKER: apiWorker,
+			AI_PROVIDER_KEY_MAIN: "test-key",
+			R2_BUCKET: mockR2,
+			AI: FAILING_TO_MARKDOWN_AI,
+		});
+		const { instance, mock } = await startTask(customEnv, "t-tail-1", [
+			{ r2Key: "doc.pdf", mimeType: "application/pdf" },
+		]);
+
+		// 打开故障钩子：put('task', {phase:'failed'}) 抛错。
+		// 修复前该异常会逃出 alarm() → 平台自动重试 alarm（2026-09-02 事故级联）；
+		// 修复后走降级链：完整 put 失败 → 剥离重字段 put 仍失败 → deleteAll 放弃断点
+		mock.failPutFailedTask = true;
+		await runUntilIdle(instance, mock); // 若异常逃逸，此处 await 直接 reject，测试失败
+
+		// session 已尽力标记 failed；断点无法落盘 → 整体清空；不再挂清理 alarm（无可清理之物）
+		expect(patches).toEqual([{ status: "failed" }]);
+		expect(mock.data.size).toBe(0);
+		expect(mock.pendingAlarm).toBeNull();
 	});
 });
 

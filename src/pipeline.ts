@@ -169,7 +169,9 @@ export async function runBatchGenerationPhase(
 
 /**
  * 上传阶段：把全部题目分片入库（所有题目必须完整上传，严禁截断）。
- * - 题目总数 > 单请求上限（API MAX_BATCH_SIZE=500）时自动分片，每片 UPLOAD_CHUNK_SIZE 题
+ * 题目从 q_* 分键流式读取（由 readBatches 提供，按全局题序产出批次），堆内仅驻留当前片。
+ * - 攒满 UPLOAD_CHUNK_SIZE 题发一片；全部读尽后余量作为最后一片（final=true）
+ * - offset = 本片首题全局序号，配合 API 端确定性 id + INSERT OR IGNORE，任何片重发不产生重复行
  * - startOffset：断点续传起点（已成功上传的题数），自动重试时从断点续，不重发已传片
  * - onChunkUploaded：每片成功后的回调（DO 用于把 uploadedCount 断点落盘）
  * 仅最后一片会把 session 置为 completed（API 端 final 语义）。
@@ -177,25 +179,50 @@ export async function runBatchGenerationPhase(
 export async function runUploadPhase(
 	env: Env,
 	ticket: string,
-	questions: GeneratedQuestion[],
-	startOffset: number,
-	onChunkUploaded?: (uploadedCount: number) => Promise<void>,
+	opts: {
+		/** 题目总数（= DO 计数 acceptedCount），用于断点校验与哨兵 */
+		totalQuestions: number;
+		/** 断点续传起点（已成功上传的题数） */
+		startOffset: number;
+		/** 按 q_1..q_N 顺序产出题目批次、跳过前 skip 题的读取器（DO 提供） */
+		readBatches: (skip: number) => AsyncGenerator<GeneratedQuestion[]>;
+		/** 每片成功后的回调（uploadedCount = 累计已上传题数） */
+		onChunkUploaded?: (uploadedCount: number) => Promise<void>;
+	},
 ): Promise<void> {
-	if (questions.length === 0) {
+	const { totalQuestions, startOffset, readBatches, onChunkUploaded } = opts;
+	if (totalQuestions === 0) {
 		throw new TaskError('所有批次中没有合格题目（JSON 解析失败或全部未通过校验）');
 	}
-	if (startOffset < 0 || startOffset > questions.length) {
-		throw new TaskError(`Invalid upload checkpoint: ${startOffset}/${questions.length}`);
+	if (startOffset < 0 || startOffset > totalQuestions) {
+		throw new TaskError(`Invalid upload checkpoint: ${startOffset}/${totalQuestions}`);
 	}
 
-	const pending = questions.slice(startOffset);
-	for (let i = 0; i < pending.length; i += UPLOAD_CHUNK_SIZE) {
-		const chunk = pending.slice(i, i + UPLOAD_CHUNK_SIZE);
-		const offset = startOffset + i;
-		const final = i + UPLOAD_CHUNK_SIZE >= pending.length;
-		await uploadQuestions(env.API_WORKER, ticket, chunk, offset, final);
+	// 边界：断点恰好在批界/末尾时，读取器可能一个批次都不产出——
+	// 此时 totalQuestions 已 > 0 且全部上传过，正常空循环收尾即可
+	let buffer: GeneratedQuestion[] = [];
+	let offset = startOffset;
+	for await (const batch of readBatches(startOffset)) {
+		buffer.push(...batch);
+		while (buffer.length >= UPLOAD_CHUNK_SIZE) {
+			const chunk = buffer.slice(0, UPLOAD_CHUNK_SIZE);
+			const final = offset + chunk.length >= totalQuestions;
+			await uploadQuestions(env.API_WORKER, ticket, chunk, offset, final);
+			offset += chunk.length;
+			if (onChunkUploaded) {
+				await onChunkUploaded(offset);
+			}
+			buffer = buffer.slice(UPLOAD_CHUNK_SIZE);
+		}
+	}
+	// 读取器读尽：buffer 余量（若有）是最后一片；buffer 为空说明 startOffset 已在片界上
+	// 且此前片已全部成功（含 final），无需再发
+	if (buffer.length > 0) {
+		const final = offset + buffer.length >= totalQuestions;
+		await uploadQuestions(env.API_WORKER, ticket, buffer, offset, final);
+		offset += buffer.length;
 		if (onChunkUploaded) {
-			await onChunkUploaded(startOffset + i + chunk.length);
+			await onChunkUploaded(offset);
 		}
 	}
 }

@@ -39,7 +39,13 @@ interface TaskState {
 	plan: GenerationPlan | null;
 	batchIndex: number;
 	totalBatches: number;
-	allQuestions: GeneratedQuestion[];
+	/**
+	 * 已生成并入账的题数。题目本体按批存在独立分键 q_<batchIndex>（每批 ≤ GENERATION_BATCH_SIZE 题），
+	 * task 只保留计数——所有 key 的体积都与题量无关，永不触碰 SQLite DO「key+value ≤ 2MB」单键上限。
+	 */
+	acceptedCount: number;
+	/** 已写入的 q_* 分键数（上传阶段按 1..questionBatches 顺序流式读取） */
+	questionBatches: number;
 	allStems: string[];
 	/** 当前批是否已因输出侧内容审核 block 重生成过一次（每批最多一次） */
 	batchScanRetried: boolean;
@@ -78,6 +84,21 @@ function isRetriable(err: unknown): boolean {
 }
 
 /**
+ * 错误安全渲染：把 name + message 拼进字符串。
+ * 生产 observability 对部分内部错误（如 DO 存储层错误）的 Error 参数序列化会丢 message
+ * （2026-09-02 事故日志只余栈帧、消息为空），不能依赖日志参数渲染错误详情。
+ */
+function describeUnknown(err: unknown): string {
+	if (err instanceof Error) return `${err.name}: ${err.message}`;
+	if (typeof err === 'string') return err;
+	try {
+		return `${typeof err} ${String(err)}`;
+	} catch {
+		return 'unknown (unstringifiable)';
+	}
+}
+
+/**
  * Quiz Generation Durable Object
  *
  * 用 alarm() 把出题管线拆成多个独立 invocation，
@@ -111,7 +132,7 @@ export class QuizGenerationDO implements DurableObject {
 				return new Response('Ticket mismatch', { status: 409 });
 			}
 			if (existing.failedPhase && sameMaterials(existing.materials, materials)) {
-				// ── 断点续传：DO storage 保留有全部检查点（corpus、已生成批次、扫描会话）──
+				// ── 断点续传：DO storage 保留有全部检查点（corpus、q_* 题目分键、扫描会话）──
 				// planning 是 alarm() 里 pending 分支的瞬态，必须映射回 pending 才能重入状态机；
 				// scanning / generating / uploading 都是持久断点分支，直接恢复即可
 				existing.phase = existing.failedPhase === 'planning' ? 'pending' : existing.failedPhase;
@@ -129,7 +150,7 @@ export class QuizGenerationDO implements DurableObject {
 				await this.state.storage.put('task', existing);
 				// setAlarm 是替换语义：覆盖掉 failed 时挂的清理 alarm，立即续跑
 				await this.scheduleAlarm();
-				console.log(`Session ${ticket} resumed from checkpoint (phase=${existing.phase}, batch=${existing.batchIndex}/${existing.totalBatches}, questions=${existing.allQuestions.length})`);
+				console.log(`Session ${ticket} resumed from checkpoint (phase=${existing.phase}, batch=${existing.batchIndex}/${existing.totalBatches}, questions=${existing.acceptedCount})`);
 				return new Response('Resumed', { status: 202 });
 			}
 			// 旧格式断点（无 failedPhase，corpus 已被旧版错误处理删除）或源材料已变：
@@ -148,7 +169,8 @@ export class QuizGenerationDO implements DurableObject {
 			plan: null,
 			batchIndex: 0,
 			totalBatches: 0,
-			allQuestions: [],
+			acceptedCount: 0,
+			questionBatches: 0,
 			allStems: [],
 			batchScanRetried: false,
 			scan: null,
@@ -227,6 +249,9 @@ export class QuizGenerationDO implements DurableObject {
 				task.batchIndex = 1;
 				task.phase = 'generating';
 				task.alarmRetries = 0; // 规划成功，复位阶段重试计数
+				// 扫描语料已并入 corpus（独立键），task 里的副本置空——
+				// task 体积与语料大小解耦，避免每次批次落盘都重复携带整段 OCR 文本
+				task.preScannedCorpus = '';
 
 				await this.state.storage.put('task', task);
 				await this.state.storage.put('corpus', corpus);
@@ -280,12 +305,12 @@ export class QuizGenerationDO implements DurableObject {
 				}
 				await this.checkAndRenewTicket(task.ticket, {
 					phase: 'generating',
-					done: task.allQuestions.length,
+					done: task.acceptedCount,
 					total: task.plan.totalCount,
 				});
 
 				// 已达计划总数 → 直接进入上传（无需再跑一轮空 alarm）
-				const remaining = task.plan.totalCount - task.allQuestions.length;
+				const remaining = task.plan.totalCount - task.acceptedCount;
 				if (remaining <= 0) {
 					task.phase = 'uploading';
 					await this.state.storage.put('task', task);
@@ -342,21 +367,26 @@ export class QuizGenerationDO implements DurableObject {
 				}
 				task.emptyStreak = 0;
 
+				// 题目分键：本批写入独立 key q_<batchIndex>（≤ GENERATION_BATCH_SIZE 题，几十 KB 量级），
+				// task 只留计数——每个 key 的体积都与题量无关，永不触碰 SQLite DO 单 key 2MB 上限。
+				// 先写 q_ 后写 task：task 落盘成功才算入账；中途失败重试时 batchIndex 未推进，同 key 覆盖幂等。
+				await this.state.storage.put(`q_${task.batchIndex}`, accepted);
+				task.questionBatches = Math.max(task.questionBatches, task.batchIndex);
+				task.acceptedCount += accepted.length;
 				task.batchScanRetried = false; // 本批通过审核，复位供下一批使用
-				task.allQuestions.push(...accepted);
 				// 累积去重窗口（此前是覆盖写，只跟上一批去重；题量大时跨批重复风险高）
 				task.allStems = [...task.allStems, ...stems].slice(-STEM_WINDOW);
 				task.batchIndex++;
 				task.alarmRetries = 0; // 本批成功，复位阶段重试计数
 
 				console.log(
-					`Batch ${task.batchIndex - 1}/${task.totalBatches}: ${accepted.length} valid (total: ${task.allQuestions.length}/${task.plan.totalCount})`,
+					`Batch ${task.batchIndex - 1}/${task.totalBatches}: ${accepted.length} valid (total: ${task.acceptedCount}/${task.plan.totalCount})`,
 				);
 
 				await this.state.storage.put('task', task);
 
 				// 循环条件：计数驱动（不依赖 batchIndex 是否走完，以实际题数为准）
-				if (task.allQuestions.length < task.plan.totalCount) {
+				if (task.acceptedCount < task.plan.totalCount) {
 					await this.scheduleAlarm();
 				} else {
 					// 全部批次完成 → 进入上传阶段
@@ -372,26 +402,31 @@ export class QuizGenerationDO implements DurableObject {
 				}
 				await this.checkAndRenewTicket(task.ticket, {
 					phase: 'uploading',
-					done: task.allQuestions.length,
+					done: task.acceptedCount,
 					total: task.plan.totalCount,
 				});
 
 				// 断点已覆盖全部题目（末片已成功、但收尾落盘前中断）：直接收尾，
 				// 否则空循环不再发片，session 会永远停在 processing（末片的 completed 由 API 端已写入）
-				if (task.allQuestions.length > 0 && task.uploadedCount >= task.allQuestions.length) {
+				if (task.acceptedCount > 0 && task.uploadedCount >= task.acceptedCount) {
 					console.warn(`Session ${task.ticket}: upload checkpoint already complete (${task.uploadedCount}), finalizing`);
 				} else {
 					// 自动重试时重入本分支，从 uploadedCount 断点续传，已成功的片不会重发；
 					// API 端确定性 id + INSERT OR IGNORE 保证任何片重发都不会产生重复行
 					// ?? 0：兼容旧格式任务（无 uploadedCount 字段），避免 offset 变 NaN 退回非幂等路径
-					await runUploadPhase(this.env, task.ticket, task.allQuestions, task.uploadedCount ?? 0,
-						async (uploadedCount) => {
+					// 题目本体从 q_* 分键流式读取（堆内仅驻留当前片），不再全量驻留
+					await runUploadPhase(this.env, task.ticket, {
+						totalQuestions: task.acceptedCount,
+						startOffset: task.uploadedCount ?? 0,
+						readBatches: (skip) => this.readQuestionBatches(task.questionBatches, skip),
+						onChunkUploaded: async (uploadedCount) => {
 							task.uploadedCount = uploadedCount;
 							task.alarmRetries = 0; // 片成功，复位阶段重试计数
 							await this.state.storage.put('task', task);
-						});
+						},
+					});
 				}
-				console.log(`Uploaded ${task.allQuestions.length} questions for session ${task.ticket}`);
+				console.log(`Uploaded ${task.acceptedCount} questions for session ${task.ticket}`);
 
 				task.phase = 'done';
 				await this.state.storage.put('task', task);
@@ -401,7 +436,13 @@ export class QuizGenerationDO implements DurableObject {
 			}
 			// done / failed：不调度下一阶段 alarm——终态清理 alarm 已由对应路径挂上
 		} catch (err) {
-			await this.handleTaskError(task, err);
+			// 最外层防线：handleTaskError 自身故障也绝不让异常逃出 alarm()——
+			// 逃逸会触发平台对 alarm 的自动重试，而任务状态未变、问题必然原样复现
+			try {
+				await this.handleTaskError(task, err);
+			} catch (fatalErr) {
+				console.error(`handleTaskError itself failed for session ${task.ticket}: ${describeUnknown(fatalErr)}`);
+			}
 		}
 	}
 
@@ -443,17 +484,23 @@ export class QuizGenerationDO implements DurableObject {
 			if (task.phase === 'planning') {
 				task.phase = 'pending';
 			}
-			await this.state.storage.put('task', task);
-			await this.scheduleAlarm();
-			console.warn(`Phase ${retriedPhase} retry ${task.alarmRetries}/${PHASE_AUTO_RETRIES} for session ${task.ticket}:`, err);
-			return; // 不置 failed、不动 session
+			try {
+				await this.state.storage.put('task', task);
+				await this.scheduleAlarm();
+				console.warn(`Phase ${retriedPhase} retry ${task.alarmRetries}/${PHASE_AUTO_RETRIES} for session ${task.ticket}:`, err);
+				return; // 不置 failed、不动 session
+			} catch (persistErr) {
+				// 断点写盘失败（存储故障）：落入下方 failed 收敛路径，绝不让异常逃出 alarm()
+				console.error(`Failed to persist retry state for session ${task.ticket}: ${describeUnknown(persistErr)}`);
+			}
 		}
 
 		// 取消信号：renewTicket / patchSessionStatus 收到 4xx（upload 的 4xx 是业务故障，不算取消）
 		if (err instanceof ApiClientError && err.status < 500 && err.origin !== 'upload') {
 			console.warn(`Session ${task.ticket} cancelled or ticket invalid:`, err.message);
 		} else {
-			console.error(`Task failed for session ${task.ticket}:`, err);
+			// 错误详情拼进消息字符串（describeUnknown）：不能依赖日志参数渲染错误对象
+			console.error(`Task failed for session ${task.ticket}: ${describeUnknown(err)}`);
 		}
 
 		// 尽力把 session 标记为 failed（可能也因同样原因失败，忽略）；
@@ -465,12 +512,55 @@ export class QuizGenerationDO implements DurableObject {
 			// 忽略——API 可能不可达
 		}
 
-		// 记录断点（phase 当前仍是失败发生时的工作阶段），保留 corpus 供续生成
+		// 记录断点（phase 当前仍是失败发生时的工作阶段），保留 corpus + q_* 题目分键供续生成。
+		// 尾部加固：这里的 put 绝不能让异常逃出 alarm()——逃逸会触发平台对 alarm 的自动重试，
+		// 而任务状态未变、问题必然原样复现（2026-09-02 事故的重试级联即此机制）。
 		task.failedPhase = task.phase;
 		task.phase = 'failed';
-		await this.state.storage.put('task', task);
+		try {
+			await this.state.storage.put('task', task);
+		} catch (putErr) {
+			// task 已是轻量计数状态，put 失败属异常存储故障：剥离重字段降级重试，仍失败则放弃断点清空
+			console.error(`Failed to persist failed state for session ${task.ticket}: ${describeUnknown(putErr)}`);
+			try {
+				await this.state.storage.put('task', { ...task, scan: null, allStems: [] });
+			} catch {
+				await this.state.storage.deleteAll();
+				return;
+			}
+		}
 		// 保留期到点由 alarm 清理（setAlarm 替换语义，resume 时会被立即执行的调度覆盖）
-		await this.state.storage.setAlarm(Date.now() + FAILED_TASK_RETENTION_MS);
+		try {
+			await this.state.storage.setAlarm(Date.now() + FAILED_TASK_RETENTION_MS);
+		} catch (alarmErr) {
+			// 清理 alarm 挂不上仅记日志：残留一个 failed 任务占用 storage，可接受
+			console.error(`Failed to schedule cleanup alarm for session ${task.ticket}: ${describeUnknown(alarmErr)}`);
+		}
+	}
+
+	/**
+	 * 按 q_1..q_<batchCount> 顺序产出题目批次（全局题序），跳过前 skip 题（上传断点续传用）。
+	 * 缺失/空的分键静默跳过；skip 落在批中间时按批切割。
+	 */
+	private async *readQuestionBatches(
+		batchCount: number,
+		skip: number,
+	): AsyncGenerator<GeneratedQuestion[]> {
+		let remainingSkip = Math.max(0, skip);
+		for (let b = 1; b <= batchCount; b++) {
+			const batch = await this.state.storage.get<GeneratedQuestion[]>(`q_${b}`);
+			if (!batch || batch.length === 0) continue;
+			if (remainingSkip >= batch.length) {
+				remainingSkip -= batch.length;
+				continue;
+			}
+			if (remainingSkip > 0) {
+				yield batch.slice(remainingSkip);
+				remainingSkip = 0;
+			} else {
+				yield batch;
+			}
+		}
 	}
 
 	/**
